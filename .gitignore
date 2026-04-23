@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.unitask/
+*.log
+.DS_Store
+.env
+.env.local
+docs/
+scripts/

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>anthropics/claude-code stars</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 3rem; color: #222; }
+    h1 { font-size: 4rem; margin: 0; }
+    small { color: #666; }
+    .err { color: #c00; }
+  </style>
+</head>
+<body>
+  <p><small>anthropics/claude-code</small></p>
+  <h1>⭐ <span id="stars">—</span></h1>
+  <p><small id="at">loading...</small></p>
+  <script>
+    const URL   = "http://127.0.0.1:4747/a/act_01KPY2ZJNWC70CG0TR10YE5NP6";
+    const TOKEN = "23b167975a12b21e12a46b1c9d65a768d0a1e97fcc22466ed96b59de2d08caa7";
+
+    const $stars = document.getElementById("stars");
+    const $at    = document.getElementById("at");
+
+    async function tick() {
+      try {
+        const r = await fetch(URL, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${TOKEN}`,
+            "Content-Type": "application/json",
+          },
+          body: "{}",
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = await r.json();
+        $stars.textContent = j.output.stars.toLocaleString();
+        $at.textContent    = `last: ${new Date(j.output.at).toLocaleTimeString()} · forks: ${j.output.forks.toLocaleString()}`;
+        $at.className = "";
+      } catch (e) {
+        $at.textContent = `error: ${e.message}`;
+        $at.className = "err";
+      }
+    }
+
+    tick();
+    setInterval(tick, 10_000);
+  </script>
+</body>
+</html>
