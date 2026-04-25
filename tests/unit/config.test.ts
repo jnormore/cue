@@ -27,9 +27,8 @@ describe("cuePaths", () => {
       home: "/a/b",
       token: "/a/b/token",
       port: "/a/b/port",
-      actions: "/a/b/actions",
-      triggers: "/a/b/triggers",
-      runs: "/a/b/runs",
+      db: "/a/b/cue.db",
+      blobs: "/a/b/blobs",
     });
   });
 });
@@ -45,12 +44,9 @@ describe("resolveConfig", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it("creates the home directory tree", () => {
+  it("creates the home directory", () => {
     const cfg = resolveConfig({ home, env: {} });
     expect(existsSync(cfg.paths.home)).toBe(true);
-    expect(existsSync(cfg.paths.actions)).toBe(true);
-    expect(existsSync(cfg.paths.triggers)).toBe(true);
-    expect(existsSync(cfg.paths.runs)).toBe(true);
   });
 
   it("generates a 64-char hex token on first resolve, chmod 600", () => {
@@ -120,23 +116,23 @@ describe("resolveConfig", () => {
     expect(cfg.runtime).toBe("not-a-real-one");
   });
 
-  it("defaults store to fs", () => {
+  it("defaults store to sqlite", () => {
     const cfg = resolveConfig({ home, env: {} });
     expect(cfg.store).toBe(DEFAULT_STORE);
-    expect(DEFAULT_STORE).toBe("fs");
+    expect(DEFAULT_STORE).toBe("sqlite");
   });
 
   it("prefers storeFlag > env > default", () => {
-    expect(resolveConfig({ home, env: { CUE_STORE: "sqlite" } }).store).toBe(
-      "sqlite",
+    expect(resolveConfig({ home, env: { CUE_STORE: "postgres" } }).store).toBe(
+      "postgres",
     );
     expect(
       resolveConfig({
         home,
-        env: { CUE_STORE: "sqlite" },
-        storeFlag: "postgres",
+        env: { CUE_STORE: "postgres" },
+        storeFlag: "fs",
       }).store,
-    ).toBe("postgres");
+    ).toBe("fs");
   });
 
   it("does not validate unknown store names (step-3 adapter will)", () => {

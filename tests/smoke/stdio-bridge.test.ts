@@ -29,7 +29,7 @@ describe("stdio↔HTTP MCP bridge smoke", () => {
 
   beforeAll(async () => {
     home = mkdtempSync(join(tmpdir(), "cue-stdio-smoke-"));
-    store = pickStore("fs", { home });
+    store = pickStore("sqlite", { home });
     const runtime: ActionRuntime = {
       name: "mock",
       async doctor() {

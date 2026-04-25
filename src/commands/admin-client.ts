@@ -4,14 +4,13 @@ import { join } from "node:path";
 import { DEFAULT_PORT, cuePaths } from "../config.js";
 
 /**
- * The CLI uses the master token against two surfaces:
- *   1. The filesystem directly (see local-store.ts) for storage ops.
- *   2. `/a/:id` for action invocation — the one thing the daemon
- *      uniquely owns (spawns the unikernel, records the run).
- * This helper resolves the master token + daemon URL + timeouts that
- * the invoke path needs. No `/admin/*` routes exist — anything you
- * might have reached for via admin is either file I/O or (for invoke)
- * goes through the public `/a/:id` surface.
+ * The CLI talks to the daemon over HTTP. The master token at
+ * `~/.cue/token` authenticates every request — both the public
+ * surfaces (`/a/:id`) and the operator-only `/admin/*` routes.
+ *
+ * Helpers below cover the four verbs we actually use; each one
+ * shares the same auth + error-translation path so commands stay
+ * tight.
  */
 export interface DaemonEndpoint {
   baseUrl: string;
@@ -30,25 +29,33 @@ export function printJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-export async function postJson<T = unknown>(
-  url: string,
-  token: string,
-  body: unknown,
-): Promise<T> {
+interface RequestOpts {
+  url: string;
+  token: string;
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  body?: unknown;
+}
+
+async function request<T = unknown>(o: RequestOpts): Promise<T> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${o.token}`,
+    Accept: "application/json",
+  };
+  let body: string | undefined;
+  if (o.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify(o.body);
+  }
   let res: Response;
   try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify(body ?? {}),
+    res = await fetch(o.url, {
+      method: o.method,
+      headers,
+      ...(body !== undefined ? { body } : {}),
     });
   } catch (err) {
     die(
-      `cannot reach cue daemon at ${url} — is \`cue serve\` running?\n${err instanceof Error ? err.message : String(err)}`,
+      `cannot reach cue daemon at ${o.url} — is \`cue serve\` running?\n${err instanceof Error ? err.message : String(err)}`,
     );
   }
   const text = await res.text();
@@ -73,6 +80,44 @@ export async function postJson<T = unknown>(
     process.exit(1);
   }
   return parsed as T;
+}
+
+export async function postJson<T = unknown>(
+  url: string,
+  token: string,
+  body: unknown,
+): Promise<T> {
+  return request<T>({ url, token, method: "POST", body: body ?? {} });
+}
+
+export async function getJson<T = unknown>(
+  url: string,
+  token: string,
+): Promise<T> {
+  return request<T>({ url, token, method: "GET" });
+}
+
+export async function patchJson<T = unknown>(
+  url: string,
+  token: string,
+  body: unknown,
+): Promise<T> {
+  return request<T>({ url, token, method: "PATCH", body: body ?? {} });
+}
+
+export async function putJson<T = unknown>(
+  url: string,
+  token: string,
+  body: unknown,
+): Promise<T> {
+  return request<T>({ url, token, method: "PUT", body: body ?? {} });
+}
+
+export async function deleteJson<T = unknown>(
+  url: string,
+  token: string,
+): Promise<T> {
+  return request<T>({ url, token, method: "DELETE" });
 }
 
 function readTokenOrDie(path: string): string {

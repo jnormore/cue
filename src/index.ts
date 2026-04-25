@@ -27,7 +27,9 @@ program
   .addOption(
     new Option("--runtime <name>", "runtime adapter name").choices(["unitask"]),
   )
-  .addOption(new Option("--store <name>", "store adapter name").choices(["fs"]))
+  .addOption(
+    new Option("--store <name>", "store adapter name").choices(["sqlite"]),
+  )
   .addOption(
     new Option("--cron <name>", "cron scheduler name").choices(["node-cron"]),
   )

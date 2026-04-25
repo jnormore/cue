@@ -87,7 +87,7 @@ describe("mcp-tools", () => {
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "cue-mcp-tools-"));
-    store = pickStore("fs", { home });
+    store = pickStore("sqlite", { home });
     const rt = makeRuntime();
     runtime = rt.runtime;
     runMock = rt.run;
@@ -109,7 +109,8 @@ describe("mcp-tools", () => {
     };
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await store.close();
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -359,7 +360,7 @@ describe("mcp-tools", () => {
         ok: true,
         details: { mock: true },
       });
-      expect(d.store.name).toBe("fs");
+      expect(d.store.name).toBe("sqlite");
       expect(d.store.ok).toBe(true);
       expect(d.cron).toEqual({
         name: "capture",

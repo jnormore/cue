@@ -1,14 +1,11 @@
 import type { Command } from "commander";
-import { pickState } from "../state/index.js";
-import { deleteNamespace as cascadeDeleteNamespace } from "../store/index.js";
-import { printJson } from "./admin-client.js";
-import { resolveHome, runLocalStoreCmd } from "./local-store.js";
+import { daemonEndpoint, deleteJson, printJson } from "./admin-client.js";
 
 /**
- * Pure file I/O cascade: delete actions, triggers, secrets, state
- * logs, and the namespace's state token. The daemon fs-watches
- * triggers so any cron schedules are cancelled within ~150ms — no
- * RPC required.
+ * Cascade-delete a namespace via the daemon's admin API: actions,
+ * triggers, secrets, state logs, and the namespace's state token all
+ * go in one transaction-shaped operation. The cron registry picks up
+ * the trigger removals through its in-process subscription.
  */
 export function registerNsCommands(program: Command): void {
   const ns = program.command("ns").description("Manage namespaces.");
@@ -18,22 +15,12 @@ export function registerNsCommands(program: Command): void {
       "Delete every action, trigger, secret, and state log tagged with the namespace.",
     )
     .action(async (name) => {
-      const home = resolveHome();
-      const state = pickState("fs", { home });
-      try {
-        await runLocalStoreCmd(async (store) => {
-          const result = await cascadeDeleteNamespace(store, state, name);
-          printJson({
-            deleted: {
-              actions: result.actions,
-              triggers: result.triggers,
-              secrets: result.secrets,
-              stateKeys: result.stateKeys,
-            },
-          });
-        });
-      } finally {
-        await state.close();
-      }
+      const { baseUrl, token } = daemonEndpoint();
+      printJson(
+        await deleteJson(
+          `${baseUrl}/admin/namespaces/${encodeURIComponent(name)}`,
+          token,
+        ),
+      );
     });
 }

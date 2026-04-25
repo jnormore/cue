@@ -18,6 +18,7 @@ export interface LoadCronResult {
 }
 
 const WATCH_DEBOUNCE_MS = 150;
+const POLL_INTERVAL_MS = 1000;
 
 export class CronRegistry {
   /** In-memory map of triggerId → CronHandle. Per-trigger schedule state. */
@@ -28,8 +29,10 @@ export class CronRegistry {
   private readonly deps: InvokeDeps;
   /** Subscription to store.triggers change notifications; null until `watch()` starts. */
   private subscription: TriggerSubscription | null = null;
-  /** Debounce handle for coalescing burst fs events into a single reconcile. */
+  /** Debounce handle for coalescing burst events into a single reconcile. */
   private pendingReconcile: NodeJS.Timeout | null = null;
+  /** Periodic poll handle — backs up the in-process subscribe path so out-of-process writes get picked up. */
+  private pollTimer: NodeJS.Timeout | null = null;
   /** Serializes reconciles so overlapping events never race. */
   private inflight: Promise<void> = Promise.resolve();
 
@@ -115,16 +118,24 @@ export class CronRegistry {
   }
 
   /**
-   * Start watching the trigger store for changes. On each notification,
-   * run a debounced reconcile. `close()` this subscription (or call
-   * `closeAll()`) to stop watching. Calling `watch()` twice replaces
-   * the existing subscription.
+   * Start watching the trigger store for changes. Two channels run in
+   * parallel: the in-process `subscribe()` callback fires synchronously
+   * for writes inside this daemon (debounced reconcile), and a periodic
+   * poll catches writes from elsewhere (CLI tools, future fleet peers)
+   * the in-process channel can't see. Calling `watch()` twice replaces
+   * any existing subscription.
    */
   watch(): void {
     if (this.subscription) this.subscription.close();
     this.subscription = this.deps.store.triggers.subscribe(() => {
       this.scheduleReconcile();
     });
+    if (this.pollTimer) clearInterval(this.pollTimer);
+    this.pollTimer = setInterval(() => {
+      this.scheduleReconcile();
+    }, POLL_INTERVAL_MS);
+    // Don't keep the event loop alive just for the poll.
+    this.pollTimer.unref();
   }
 
   private scheduleReconcile(): void {
@@ -144,6 +155,10 @@ export class CronRegistry {
     if (this.pendingReconcile) {
       clearTimeout(this.pendingReconcile);
       this.pendingReconcile = null;
+    }
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
     }
     if (this.subscription) {
       this.subscription.close();

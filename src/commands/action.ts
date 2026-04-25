@@ -1,11 +1,13 @@
 import { readFileSync } from "node:fs";
 import type { Command } from "commander";
+import type { Policy } from "../store/index.js";
 import {
-  deleteAction as cascadeDeleteAction,
-  type Policy,
-} from "../store/index.js";
-import { daemonEndpoint, postJson, printJson } from "./admin-client.js";
-import { localBaseUrl, runLocalStoreCmd } from "./local-store.js";
+  daemonEndpoint,
+  deleteJson,
+  getJson,
+  postJson,
+  printJson,
+} from "./admin-client.js";
 
 function resolveCode(opts: { code?: string; codeFile?: string }): string {
   if (opts.code !== undefined) return opts.code;
@@ -19,14 +21,9 @@ function parseJson<T>(value: string | undefined): T | undefined {
 }
 
 /**
- * Storage-only subcommands (create/list/get/delete/runs) open the
- * store directly — same files the daemon reads, no RPC needed. The
- * daemon fs-watches the triggers directory, so action deletes that
- * cascade triggers propagate to the cron registry within ~150ms.
- *
- * `invoke` is the one operation that genuinely requires the daemon
- * (it spawns the unikernel and records the run). It hits `/a/:id` —
- * the same route agents use, with the master token.
+ * All action subcommands talk to the daemon over HTTP using the master
+ * token. The daemon owns the database and runs unikernels — the CLI is
+ * a thin client.
  */
 export function registerActionCommands(program: Command): void {
   const action = program
@@ -46,21 +43,25 @@ export function registerActionCommands(program: Command): void {
         ...(flags.code !== undefined ? { code: flags.code } : {}),
         ...(flags.codeFile !== undefined ? { codeFile: flags.codeFile } : {}),
       });
-      await runLocalStoreCmd(async (store) => {
-        const created = await store.actions.create({
-          name: flags.name,
-          code,
-          ...(flags.namespace ? { namespace: flags.namespace } : {}),
-          ...(flags.policy
-            ? { policy: parseJson<Policy>(flags.policy) as Policy }
-            : {}),
-        });
-        printJson({
-          id: created.id,
-          name: created.name,
-          namespace: created.namespace,
-          invokeUrl: `${localBaseUrl()}/a/${created.id}`,
-        });
+      const { baseUrl, token } = daemonEndpoint();
+      const created = await postJson<{
+        id: string;
+        name: string;
+        namespace: string;
+        invokeUrl: string;
+      }>(`${baseUrl}/admin/actions`, token, {
+        name: flags.name,
+        code,
+        ...(flags.namespace ? { namespace: flags.namespace } : {}),
+        ...(flags.policy
+          ? { policy: parseJson<Policy>(flags.policy) as Policy }
+          : {}),
+      });
+      printJson({
+        id: created.id,
+        name: created.name,
+        namespace: created.namespace,
+        invokeUrl: created.invokeUrl,
       });
     });
 
@@ -69,26 +70,18 @@ export function registerActionCommands(program: Command): void {
     .description("List actions.")
     .option("--namespace <ns>", "filter by namespace")
     .action(async (flags) => {
-      await runLocalStoreCmd(async (store) => {
-        const items = await store.actions.list(
-          flags.namespace ? { namespace: flags.namespace } : undefined,
-        );
-        printJson(items);
-      });
+      const { baseUrl, token } = daemonEndpoint();
+      const url = new URL(`${baseUrl}/admin/actions`);
+      if (flags.namespace) url.searchParams.set("namespace", flags.namespace);
+      printJson(await getJson(url.toString(), token));
     });
 
   action
     .command("get <id>")
     .description("Return the full action record.")
     .action(async (id) => {
-      await runLocalStoreCmd(async (store) => {
-        const rec = await store.actions.get(id);
-        if (!rec) {
-          process.stderr.write(`cue: action ${id} not found\n`);
-          process.exit(1);
-        }
-        printJson(rec);
-      });
+      const { baseUrl, token } = daemonEndpoint();
+      printJson(await getJson(`${baseUrl}/admin/actions/${id}`, token));
     });
 
   action
@@ -105,17 +98,10 @@ export function registerActionCommands(program: Command): void {
 
   action
     .command("delete <id>")
-    .description(
-      "Delete an action and its triggers. Direct file ops; the daemon's fs-watch picks up the cascade.",
-    )
+    .description("Delete an action and its triggers.")
     .action(async (id) => {
-      await runLocalStoreCmd(async (store) => {
-        const result = await cascadeDeleteAction(store, id);
-        printJson({
-          deleted: result.action,
-          alsoDeleted: result.triggers,
-        });
-      });
+      const { baseUrl, token } = daemonEndpoint();
+      printJson(await deleteJson(`${baseUrl}/admin/actions/${id}`, token));
     });
 
   action
@@ -123,12 +109,11 @@ export function registerActionCommands(program: Command): void {
     .description("List recent runs for an action.")
     .option("--limit <n>", "max records", (v) => Number.parseInt(v, 10))
     .action(async (id, flags) => {
-      await runLocalStoreCmd(async (store) => {
-        const items = await store.runs.list({
-          actionId: id,
-          ...(flags.limit !== undefined ? { limit: flags.limit } : {}),
-        });
-        printJson(items);
-      });
+      const { baseUrl, token } = daemonEndpoint();
+      const url = new URL(`${baseUrl}/admin/actions/${id}/runs`);
+      if (flags.limit !== undefined) {
+        url.searchParams.set("limit", String(flags.limit));
+      }
+      printJson(await getJson(url.toString(), token));
     });
 }

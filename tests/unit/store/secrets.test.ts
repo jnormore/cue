@@ -1,51 +1,41 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type SecretStore, StoreError } from "../../../src/store/index.js";
-import { fsSecrets } from "../../../src/store/fs/secrets.js";
+import {
+  type SecretStore,
+  StoreError,
+  pickStore,
+  type StoreAdapter,
+} from "../../../src/store/index.js";
 
-describe("fsSecrets", () => {
+describe("sqlite secrets store", () => {
   let home: string;
+  let store: StoreAdapter;
   let secrets: SecretStore;
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "cue-secrets-"));
-    secrets = fsSecrets(home);
+    store = pickStore("sqlite", { home });
+    secrets = store.secrets;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await store.close();
     rmSync(home, { recursive: true, force: true });
   });
 
   describe("set", () => {
-    it("writes the secret under home/secrets/<namespace>/<name>", async () => {
+    it("stores a value resolvable via resolve()", async () => {
       await secrets.set("shop", "SHOPIFY_TOKEN", "shpat_abc");
-      const path = join(home, "secrets", "shop", "SHOPIFY_TOKEN");
-      expect(readFileSync(path, "utf8")).toBe("shpat_abc");
+      const out = await secrets.resolve("shop", ["SHOPIFY_TOKEN"]);
+      expect(out.SHOPIFY_TOKEN).toBe("shpat_abc");
     });
 
-    it("creates the namespace directory on first write", async () => {
-      expect(existsSync(join(home, "secrets", "shop"))).toBe(false);
-      await secrets.set("shop", "A", "1");
-      expect(existsSync(join(home, "secrets", "shop"))).toBe(true);
-    });
-
-    it("writes with mode 0600", async () => {
-      await secrets.set("shop", "A", "value");
-      const st = statSync(join(home, "secrets", "shop", "A"));
-      // Low 9 bits are permission; 0o600 = owner rw.
-      expect(st.mode & 0o777).toBe(0o600);
-    });
-
-    it("overwrites an existing value atomically", async () => {
+    it("overwrites an existing value", async () => {
       await secrets.set("shop", "A", "first");
       await secrets.set("shop", "A", "second");
-      expect(readFileSync(join(home, "secrets", "shop", "A"), "utf8")).toBe(
-        "second",
-      );
-      // No stale .tmp file
-      expect(existsSync(join(home, "secrets", "shop", "A.tmp"))).toBe(false);
+      expect((await secrets.resolve("shop", ["A"])).A).toBe("second");
     });
 
     it("rejects an invalid namespace", async () => {
@@ -79,7 +69,7 @@ describe("fsSecrets", () => {
       expect(await secrets.list("shop")).toEqual([]);
     });
 
-    it("returns names sorted, excluding .tmp files", async () => {
+    it("returns names sorted", async () => {
       await secrets.set("shop", "B", "2");
       await secrets.set("shop", "A", "1");
       expect(await secrets.list("shop")).toEqual(["A", "B"]);
@@ -101,8 +91,13 @@ describe("fsSecrets", () => {
       expect(resolved).toEqual({ A: "1", B: "2" });
     });
 
-    it("returns {} when the namespace has no directory yet", async () => {
+    it("returns {} when the namespace has no entries yet", async () => {
       expect(await secrets.resolve("brand-new", ["X"])).toEqual({});
+    });
+
+    it("returns {} when names list is empty", async () => {
+      await secrets.set("shop", "A", "1");
+      expect(await secrets.resolve("shop", [])).toEqual({});
     });
 
     it("does not leak secrets across namespaces", async () => {
@@ -143,7 +138,6 @@ describe("fsSecrets", () => {
       await secrets.set("shop", "B", "2");
       await secrets.deleteNamespace("shop");
       expect(await secrets.list("shop")).toEqual([]);
-      expect(existsSync(join(home, "secrets", "shop"))).toBe(false);
     });
 
     it("is a no-op when the namespace has no secrets", async () => {

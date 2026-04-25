@@ -131,7 +131,37 @@ describe.skipIf(!unitaskAvailable)(
     });
 
     it("cue mcp config auto-mints a sandbox token and emits an HTTP snippet", () => {
+      // Claude Desktop's config only accepts stdio servers, so --http emits
+      // an `mcp-remote` bridge rather than a native url+headers snippet.
       const r = cue(["mcp", "config", "claude-desktop", "--http"]);
+      expect(r.status).toBe(0);
+      const body = JSON.parse(
+        r.stdout
+          .split("\n")
+          .filter((l) => !l.startsWith("#") && l.length > 0)
+          .join("\n"),
+      ) as {
+        mcpServers: { cue: { command: string; args: string[] } };
+      };
+      expect(body.mcpServers.cue.command).toBe("npx");
+      const args = body.mcpServers.cue.args;
+      expect(args[0]).toBe("-y");
+      expect(args[1]).toBe("mcp-remote");
+      expect(args[2]).toMatch(/\/mcp$/);
+      expect(args[3]).toBe("--header");
+      expect(args[4]).toMatch(
+        /^Authorization: Bearer atk_[0-9A-Z]+\.[0-9a-f]{64}$/,
+      );
+      // Header comment reports the sandbox namespace.
+      expect(r.stdout).toMatch(
+        /# Sandbox namespace minted for this client: claude-desktop-[0-9a-z]+/,
+      );
+    });
+
+    it("cue mcp config cursor --http emits a native url+headers snippet", () => {
+      // Cursor supports HTTP MCP natively, so --http should keep the
+      // url+headers shape rather than the mcp-remote bridge.
+      const r = cue(["mcp", "config", "cursor", "--http"]);
       expect(r.status).toBe(0);
       const body = JSON.parse(
         r.stdout
@@ -146,10 +176,6 @@ describe.skipIf(!unitaskAvailable)(
       expect(body.mcpServers.cue.url).toMatch(/\/mcp$/);
       expect(body.mcpServers.cue.headers.Authorization).toMatch(
         /^Bearer atk_[0-9A-Z]+\.[0-9a-f]{64}$/,
-      );
-      // Header comment reports the sandbox namespace.
-      expect(r.stdout).toMatch(
-        /# Sandbox namespace minted for this client: claude-desktop-[0-9a-z]+/,
       );
     });
 
@@ -170,6 +196,23 @@ describe.skipIf(!unitaskAvailable)(
       expect(body.mcpServers.cue.args[2]).toMatch(
         /^atk_[0-9A-Z]+\.[0-9a-f]{64}$/,
       );
+    });
+
+    it("each cue mcp config invocation produces a distinct sandbox namespace + token", () => {
+      const a = cue(["mcp", "config", "claude-code"]);
+      const b = cue(["mcp", "config", "claude-code"]);
+      expect(a.status).toBe(0);
+      expect(b.status).toBe(0);
+      const nsA = /minted for this client: (\S+)/.exec(a.stdout)?.[1];
+      const nsB = /minted for this client: (\S+)/.exec(b.stdout)?.[1];
+      expect(nsA).toBeDefined();
+      expect(nsB).toBeDefined();
+      expect(nsA).not.toBe(nsB);
+      // Tokens are baked into the emitted command; they must also differ.
+      const tokA = /atk_[0-9A-Z]+\.[0-9a-f]{64}/.exec(a.stdout)?.[0];
+      const tokB = /atk_[0-9A-Z]+\.[0-9a-f]{64}/.exec(b.stdout)?.[0];
+      expect(tokA).toBeDefined();
+      expect(tokA).not.toBe(tokB);
     });
 
     it("cue trigger list filters by --action", () => {

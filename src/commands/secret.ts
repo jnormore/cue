@@ -1,18 +1,22 @@
 import type { Command } from "commander";
-import { printJson } from "./admin-client.js";
-import { runLocalStoreCmd } from "./local-store.js";
+import {
+  daemonEndpoint,
+  deleteJson,
+  getJson,
+  printJson,
+  putJson,
+} from "./admin-client.js";
 
 /**
- * Secrets are namespace-scoped files under `~/.cue/secrets/<ns>/<name>`
- * (mode 0600). Like agent tokens, they're pure storage — the daemon
- * reads fresh on every action invoke, so the CLI writes to disk
- * directly.
+ * Secrets are namespace-scoped, declared by actions via
+ * `policy.secrets`, and injected into the unikernel as env vars at
+ * invoke time. The daemon owns storage; the CLI is HTTP only.
  */
 export function registerSecretCommands(program: Command): void {
   const secret = program
     .command("secret")
     .description(
-      "Manage namespace-scoped secrets. Declared by actions via `policy.secrets`; stored at ~/.cue/secrets/<ns>/<name> (mode 0600) and injected into the unikernel as env vars at invoke time.",
+      "Manage namespace-scoped secrets. Declared by actions via `policy.secrets`; stored on the daemon and injected into the unikernel as env vars at invoke time.",
     );
 
   secret
@@ -22,10 +26,13 @@ export function registerSecretCommands(program: Command): void {
     .requiredOption("-N, --name <name>", "secret name (env-var style, e.g. MY_API_KEY)")
     .requiredOption("-v, --value <value>", "secret value")
     .action(async (flags) => {
-      await runLocalStoreCmd(async (store) => {
-        await store.secrets.set(flags.namespace, flags.name, flags.value);
-        printJson({ ok: true, namespace: flags.namespace, name: flags.name });
-      });
+      const { baseUrl, token } = daemonEndpoint();
+      await putJson(
+        `${baseUrl}/admin/secrets/${encodeURIComponent(flags.namespace)}/${encodeURIComponent(flags.name)}`,
+        token,
+        { value: flags.value },
+      );
+      printJson({ ok: true, namespace: flags.namespace, name: flags.name });
     });
 
   secret
@@ -33,9 +40,12 @@ export function registerSecretCommands(program: Command): void {
     .description("List secret names in a namespace. Values are never returned.")
     .requiredOption("-n, --namespace <ns>", "namespace")
     .action(async (flags) => {
-      await runLocalStoreCmd(async (store) => {
-        printJson(await store.secrets.list(flags.namespace));
-      });
+      const { baseUrl, token } = daemonEndpoint();
+      const out = await getJson<{ names: string[] }>(
+        `${baseUrl}/admin/secrets/${encodeURIComponent(flags.namespace)}`,
+        token,
+      );
+      printJson(out.names);
     });
 
   secret
@@ -44,9 +54,12 @@ export function registerSecretCommands(program: Command): void {
     .requiredOption("-n, --namespace <ns>", "namespace")
     .requiredOption("-N, --name <name>", "secret name")
     .action(async (flags) => {
-      await runLocalStoreCmd(async (store) => {
-        await store.secrets.delete(flags.namespace, flags.name);
-        printJson({ deleted: flags.name, namespace: flags.namespace });
-      });
+      const { baseUrl, token } = daemonEndpoint();
+      printJson(
+        await deleteJson(
+          `${baseUrl}/admin/secrets/${encodeURIComponent(flags.namespace)}/${encodeURIComponent(flags.name)}`,
+          token,
+        ),
+      );
     });
 }

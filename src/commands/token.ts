@@ -1,11 +1,17 @@
 import type { Command } from "commander";
-import { printJson } from "./admin-client.js";
-import { runLocalStoreCmd } from "./local-store.js";
+import {
+  daemonEndpoint,
+  deleteJson,
+  getJson,
+  postJson,
+  printJson,
+} from "./admin-client.js";
 
 /**
- * Token CRUD is pure storage — agent-token records live at
- * ~/.cue/agent-tokens/<id>.json and the daemon reads fresh on every
- * verify. The CLI opens the store directly; no HTTP hop is needed.
+ * Agent-token CRUD goes through `/admin/agent-tokens`. Mint returns the
+ * bearer once (it's not retrievable later — only verifiable). The
+ * master token (~/.cue/token) authenticates the operator request to
+ * the daemon; the master token itself is rejected on /mcp.
  */
 export function registerTokenCommands(program: Command): void {
   const token = program
@@ -28,32 +34,34 @@ export function registerTokenCommands(program: Command): void {
       const namespaces = Array.isArray(flags.namespace)
         ? flags.namespace
         : [flags.namespace];
-      await runLocalStoreCmd(async (store) => {
-        const input: { scope: { namespaces: string[] }; label?: string } = {
-          scope: { namespaces },
-        };
-        if (flags.label !== undefined) input.label = flags.label;
-        const minted = await store.agentTokens.mint(input);
-        printJson(minted);
-      });
+      const { baseUrl, token: bearer } = daemonEndpoint();
+      const body: { scope: { namespaces: string[] }; label?: string } = {
+        scope: { namespaces },
+      };
+      if (flags.label !== undefined) body.label = flags.label;
+      const minted = await postJson(
+        `${baseUrl}/admin/agent-tokens`,
+        bearer,
+        body,
+      );
+      printJson(minted);
     });
 
   token
     .command("list")
     .description("List agent tokens (summary only; bearer value is not shown).")
     .action(async () => {
-      await runLocalStoreCmd(async (store) => {
-        printJson(await store.agentTokens.list());
-      });
+      const { baseUrl, token: bearer } = daemonEndpoint();
+      printJson(await getJson(`${baseUrl}/admin/agent-tokens`, bearer));
     });
 
   token
     .command("delete <id>")
     .description("Revoke an agent token by id.")
     .action(async (id) => {
-      await runLocalStoreCmd(async (store) => {
-        await store.agentTokens.delete(id);
-        printJson({ deleted: id });
-      });
+      const { baseUrl, token: bearer } = daemonEndpoint();
+      printJson(
+        await deleteJson(`${baseUrl}/admin/agent-tokens/${id}`, bearer),
+      );
     });
 }

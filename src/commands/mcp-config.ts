@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { Command } from "commander";
 import { ulid } from "ulidx";
 import { DEFAULT_PORT, cuePaths } from "../config.js";
-import { openLocalStore } from "./local-store.js";
+import { daemonEndpoint, postJson } from "./admin-client.js";
 
 type Transport = "stdio" | "http";
 
@@ -15,6 +15,13 @@ interface JsonConfigTarget {
   path: string;
   note?: string;
   transports: Transport[];
+  /**
+   * Override the HTTP snippet shape. Some clients (Claude Desktop) only
+   * accept stdio-style configs, so `--http` must emit a stdio wrapper
+   * around an HTTP bridge like `mcp-remote`. Default shape is native
+   * `url`+`headers`.
+   */
+  httpSnippet?: (url: string, token: string) => object;
 }
 
 interface ShellCommandTarget {
@@ -50,6 +57,22 @@ const CONFIG_PATHS: Record<string, ClientTarget> = {
           ? `${homedir()}/AppData/Roaming/Claude/claude_desktop_config.json`
           : `${homedir()}/.config/Claude/claude_desktop_config.json`,
     transports: ["stdio", "http"],
+    // Claude Desktop's config only understands stdio servers, so --http
+    // has to bridge through `mcp-remote` (an npx-launched stdio↔HTTP proxy).
+    httpSnippet: (url, token) => ({
+      mcpServers: {
+        cue: {
+          command: "npx",
+          args: [
+            "-y",
+            "mcp-remote",
+            url,
+            "--header",
+            `Authorization: Bearer ${token}`,
+          ],
+        },
+      },
+    }),
   },
   cursor: {
     kind: "json-config",
@@ -89,20 +112,17 @@ async function mintSandboxToken(
   label: string | undefined,
 ): Promise<MintedScopedToken> {
   const namespace = autoNamespace(client);
-  // Agent tokens are JSON files under ~/.cue/agent-tokens/. The daemon
-  // reads fresh on every verify, so the CLI mints directly — no HTTP
-  // hop, no running daemon required.
-  const store = openLocalStore();
-  try {
-    const resolvedLabel = label ?? `${client} (auto-scoped)`;
-    const minted = await store.agentTokens.mint({
+  const { baseUrl, token: bearer } = daemonEndpoint();
+  const resolvedLabel = label ?? `${client} (auto-scoped)`;
+  const minted = await postJson<{ token: string }>(
+    `${baseUrl}/admin/agent-tokens`,
+    bearer,
+    {
       scope: { namespaces: [namespace] },
       label: resolvedLabel,
-    });
-    return { token: minted.token, namespace };
-  } finally {
-    await store.close();
-  }
+    },
+  );
+  return { token: minted.token, namespace };
 }
 
 function buildStdioSnippet(token: string): object {
@@ -124,9 +144,14 @@ function resolveLocalUrl(home: string): string {
   return `http://127.0.0.1:${DEFAULT_PORT}/mcp`;
 }
 
-function buildHttpSnippet(flags: ConfigFlags, token: string): object {
+function buildHttpSnippet(
+  target: JsonConfigTarget,
+  flags: ConfigFlags,
+  token: string,
+): object {
   const home = process.env.CUE_HOME ?? join(homedir(), ".cue");
   const url = flags.url ?? resolveLocalUrl(home);
+  if (target.httpSnippet) return target.httpSnippet(url, token);
   return {
     mcpServers: {
       cue: {
@@ -192,7 +217,7 @@ export function registerMcpConfigCommand(mcpCommand: Command): void {
 
       const snippet =
         useHttp && target.kind === "json-config"
-          ? buildHttpSnippet(flags, token)
+          ? buildHttpSnippet(target, flags, token)
           : buildStdioSnippet(token);
       process.stdout.write(`${JSON.stringify(snippet, null, 2)}\n`);
     });
@@ -210,9 +235,15 @@ function writeHeader(
   }
   if (target.note) process.stdout.write(`# ${target.note}\n`);
   if (useHttp) {
-    process.stdout.write(
-      "# HTTP transport — requires an MCP client that supports streamable-HTTP.\n",
-    );
+    if (target.kind === "json-config" && target.httpSnippet) {
+      process.stdout.write(
+        "# HTTP transport — bridged via `mcp-remote` (stdio↔HTTP). Requires `npx` on PATH.\n",
+      );
+    } else {
+      process.stdout.write(
+        "# HTTP transport — requires an MCP client that supports streamable-HTTP.\n",
+      );
+    }
   }
   process.stdout.write(
     `# Sandbox namespace minted for this client: ${namespace}\n`,

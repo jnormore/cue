@@ -6,6 +6,7 @@ import { CronRegistry } from "../cron/registry.js";
 import type { InvokeDeps } from "../invoke.js";
 import type { McpToolDeps } from "./mcp-tools.js";
 import { actionsRoutes } from "./routes/actions.js";
+import { adminRoutes } from "./routes/admin.js";
 import { healthRoutes } from "./routes/health.js";
 import { mcpRoutes } from "./routes/mcp.js";
 import { stateRoutes } from "./routes/state.js";
@@ -109,6 +110,15 @@ export async function buildServer(opts: BuildServerOpts): Promise<BuiltServer> {
   await app.register(webhookRoutes(opts));
   await app.register(
     stateRoutes({ state: opts.state, store: opts.store, token: opts.token }),
+  );
+  await app.register(
+    adminRoutes({
+      store: opts.store,
+      state: opts.state,
+      token: opts.token,
+      invokeUrlFor: mcpDepsBase.invokeUrlFor,
+      webhookUrlFor: mcpDepsBase.webhookUrlFor,
+    }),
   );
   await app.register(mcpRoutes({ deps: mcpDepsBase, token: opts.token }));
   return { app, cronRegistry, mcpDeps: mcpDepsBase };

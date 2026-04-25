@@ -13,9 +13,9 @@ import type { ProjectConfig } from "./policy.js";
 
 export const DEFAULT_PORT = 4747;
 export const DEFAULT_RUNTIME = "unitask";
-export const DEFAULT_STORE = "fs";
+export const DEFAULT_STORE = "sqlite";
 export const DEFAULT_CRON = "node-cron";
-export const DEFAULT_STATE = "fs";
+export const DEFAULT_STATE = "sqlite";
 export const DEFAULT_CORS: readonly string[] = [];
 const TOKEN_BYTES = 32;
 
@@ -23,9 +23,10 @@ export interface CuePaths {
   home: string;
   token: string;
   port: string;
-  actions: string;
-  triggers: string;
-  runs: string;
+  /** SQLite database file. */
+  db: string;
+  /** Directory holding blob storage for run output. */
+  blobs: string;
 }
 
 export interface CueConfig {
@@ -62,16 +63,15 @@ export function cuePaths(home: string): CuePaths {
     home,
     token: join(home, "token"),
     port: join(home, "port"),
-    actions: join(home, "actions"),
-    triggers: join(home, "triggers"),
-    runs: join(home, "runs"),
+    db: join(home, "cue.db"),
+    blobs: join(home, "blobs"),
   };
 }
 
 function ensureHome(paths: CuePaths): void {
-  for (const dir of [paths.home, paths.actions, paths.triggers, paths.runs]) {
-    mkdirSync(dir, { recursive: true });
-  }
+  // Just the home dir; SQLite creates the DB file on first open and
+  // the blob adapter creates `blobs/` lazily.
+  mkdirSync(paths.home, { recursive: true });
 }
 
 function loadOrCreateToken(paths: CuePaths): string {

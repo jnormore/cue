@@ -1,47 +1,40 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { fsLog } from "../../../src/state/fs/log.js";
-import { type LogStore } from "../../../src/state/index.js";
-import { StoreError } from "../../../src/store/index.js";
+import {
+  type LogStore,
+  pickState,
+  type StateAdapter,
+} from "../../../src/state/index.js";
+import { pickStore, StoreError } from "../../../src/store/index.js";
 
-describe("fsLog", () => {
+describe("sqlite log store", () => {
   let home: string;
+  let state: StateAdapter;
   let log: LogStore;
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "cue-log-"));
-    log = fsLog(home);
+    // Open the store first so migrations run; close it immediately.
+    pickStore("sqlite", { home }).close();
+    state = pickState("sqlite", { home });
+    log = state.log;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await state.close();
     rmSync(home, { recursive: true, force: true });
   });
 
   describe("append", () => {
-    it("writes to state/logs/<namespace>/<key>.ndjson with seq 1, 2, 3…", async () => {
+    it("starts seq at 1 and increments per (ns, key)", async () => {
       const r1 = await log.append("shop", "orders", { id: 1 });
       const r2 = await log.append("shop", "orders", { id: 2 });
       const r3 = await log.append("shop", "orders", { id: 3 });
       expect(r1.seq).toBe(1);
       expect(r2.seq).toBe(2);
       expect(r3.seq).toBe(3);
-
-      const raw = readFileSync(
-        join(home, "state", "logs", "shop", "orders.ndjson"),
-        "utf8",
-      );
-      const lines = raw.trim().split("\n").map((l) => JSON.parse(l));
-      expect(lines).toHaveLength(3);
-      expect(lines[0]).toMatchObject({ seq: 1, entry: { id: 1 } });
-      expect(lines[2]).toMatchObject({ seq: 3, entry: { id: 3 } });
-    });
-
-    it("creates namespace directory on first append", async () => {
-      expect(existsSync(join(home, "state", "logs", "shop"))).toBe(false);
-      await log.append("shop", "orders", { id: 1 });
-      expect(existsSync(join(home, "state", "logs", "shop"))).toBe(true);
     });
 
     it("rejects invalid namespace/key", async () => {
@@ -56,7 +49,23 @@ describe("fsLog", () => {
       );
     });
 
-    it("serializes concurrent appends to the same key (no torn lines, no dup seq)", async () => {
+    it("rejects entries larger than 64KB", async () => {
+      // 100KB string easily exceeds the 64KB cap once JSON-serialized.
+      const big = { blob: "x".repeat(100 * 1024) };
+      await expect(log.append("shop", "orders", big)).rejects.toMatchObject({
+        kind: "ValidationError",
+      });
+    });
+
+    it("accepts entries just under the 64KB cap", async () => {
+      // 60KB of payload + JSON overhead stays under 64KB.
+      const small = { blob: "x".repeat(60 * 1024) };
+      await expect(
+        log.append("shop", "orders", small),
+      ).resolves.toMatchObject({ seq: 1 });
+    });
+
+    it("serializes concurrent appends to the same key (no dup seq)", async () => {
       const N = 20;
       const promises = Array.from({ length: N }, (_, i) =>
         log.append("shop", "orders", { i }),
@@ -64,23 +73,16 @@ describe("fsLog", () => {
       const results = await Promise.all(promises);
       const seqs = results.map((r) => r.seq).sort((a, b) => a - b);
       expect(seqs).toEqual(Array.from({ length: N }, (_, i) => i + 1));
-      const raw = readFileSync(
-        join(home, "state", "logs", "shop", "orders.ndjson"),
-        "utf8",
-      );
-      const lines = raw.trim().split("\n");
-      expect(lines).toHaveLength(N);
-      for (const line of lines) {
-        expect(() => JSON.parse(line)).not.toThrow();
-      }
     });
 
-    it("resumes numbering after daemon restart (re-reads highest seq)", async () => {
+    it("resumes numbering across reopens", async () => {
       await log.append("shop", "orders", { id: 1 });
       await log.append("shop", "orders", { id: 2 });
-      // Fresh adapter over the same home.
-      const fresh = fsLog(home);
-      const r3 = await fresh.append("shop", "orders", { id: 3 });
+      await state.close();
+      // Reopen against the same home.
+      state = pickState("sqlite", { home });
+      log = state.log;
+      const r3 = await log.append("shop", "orders", { id: 3 });
       expect(r3.seq).toBe(3);
     });
   });
@@ -146,7 +148,7 @@ describe("fsLog", () => {
   });
 
   describe("delete", () => {
-    it("removes a single key's file", async () => {
+    it("removes a single key", async () => {
       await log.append("shop", "orders", {});
       await log.delete("shop", "orders");
       expect(await log.list("shop")).toEqual([]);
@@ -171,7 +173,6 @@ describe("fsLog", () => {
       await log.append("shop", "refunds", {});
       await log.deleteNamespace("shop");
       expect(await log.list("shop")).toEqual([]);
-      expect(existsSync(join(home, "state", "logs", "shop"))).toBe(false);
     });
 
     it("does not touch other namespaces", async () => {

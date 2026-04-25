@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { ulid } from "ulidx";
 import type { StateAdapter } from "../state/index.js";
-import { fsAdapter } from "./fs/adapter.js";
+import { sqliteStore } from "./sql/sqlite/adapter.js";
 
 export type ActionId = string;
 export type TriggerId = string;
@@ -155,6 +155,17 @@ export interface TriggerStore {
    * hint to reconcile from scratch, not as an authoritative delta.
    */
   subscribe(onChange: () => void): TriggerSubscription;
+  /**
+   * Atomically claim the right to fire this trigger. Returns true if
+   * claimed by this caller, false if another daemon got there first.
+   * Single-node SQLite always returns true (the only daemon always
+   * wins). Postgres implements this for fleet coordination.
+   *
+   * `leaseMs` is how long the claim is valid before another daemon
+   * may try again — useful for crash recovery when the claimer dies
+   * mid-fire.
+   */
+  claimFire(triggerId: TriggerId, leaseMs: number): Promise<boolean>;
 }
 
 export interface RunStore {
@@ -168,6 +179,40 @@ export interface RunStore {
   readStdout(id: RunId): Promise<string>;
   readStderr(id: RunId): Promise<string>;
   readInput(id: RunId): Promise<unknown>;
+}
+
+export type NamespaceStatus = "active" | "paused" | "archived";
+
+export interface NamespaceRecord {
+  name: string;
+  displayName?: string;
+  description?: string;
+  status: NamespaceStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NamespacePatch {
+  /** Set to null to clear. */
+  displayName?: string | null;
+  description?: string | null;
+  status?: NamespaceStatus;
+}
+
+/**
+ * First-class namespace records. The metadata sits alongside the
+ * resources tagged with each namespace (actions, triggers, secrets,
+ * state). Lifecycle status is enforced at the invocation entry points
+ * (cron, webhook, MCP invoke) and at mutation entry points (archive
+ * makes mutations fail).
+ */
+export interface NamespaceStore {
+  get(name: string): Promise<NamespaceRecord | null>;
+  list(): Promise<NamespaceRecord[]>;
+  /** Create-or-update by name. Used both by the create CLI and by bootstrap. */
+  upsert(record: NamespaceRecord): Promise<NamespaceRecord>;
+  update(name: string, patch: NamespacePatch): Promise<NamespaceRecord>;
+  delete(name: string): Promise<void>;
 }
 
 /**
@@ -232,11 +277,19 @@ export interface AgentTokenStore {
 export interface StoreAdapter {
   name: string;
   doctor(): Promise<{ ok: boolean; details: Record<string, unknown> }>;
+  namespaces: NamespaceStore;
   actions: ActionStore;
   triggers: TriggerStore;
   runs: RunStore;
   secrets: SecretStore;
   agentTokens: AgentTokenStore;
+  /**
+   * Run `fn` inside a transaction. The adapter passed to `fn` is the
+   * same shape as the outer one, but all writes are atomic — they
+   * commit on return, roll back on throw. SQLite uses BEGIN IMMEDIATE;
+   * Postgres uses BEGIN. Nesting is not supported.
+   */
+  transaction<T>(fn: (tx: StoreAdapter) => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }
 
@@ -311,11 +364,11 @@ export interface StorePickOpts {
 
 export function pickStore(name: string, opts: StorePickOpts): StoreAdapter {
   switch (name) {
-    case "fs":
-      return fsAdapter(opts.home);
+    case "sqlite":
+      return sqliteStore(opts.home);
     default:
       throw new Error(
-        `Unknown store adapter: "${name}". Known adapters: fs`,
+        `Unknown store adapter: "${name}". Known adapters: sqlite`,
       );
   }
 }

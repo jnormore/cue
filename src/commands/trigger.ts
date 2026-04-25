@@ -1,11 +1,16 @@
 import type { Command } from "commander";
-import { printJson } from "./admin-client.js";
-import { localBaseUrl, runLocalStoreCmd } from "./local-store.js";
+import {
+  daemonEndpoint,
+  deleteJson,
+  getJson,
+  postJson,
+  printJson,
+} from "./admin-client.js";
 
 /**
- * All trigger ops are pure file I/O. The daemon fs-watches its
- * triggers directory and reconciles its cron schedules within ~150ms
- * of any create/delete. No RPC needed.
+ * Trigger ops go through `/admin/triggers`. The daemon picks up
+ * created/deleted triggers via in-process notification (synchronous)
+ * plus a 1-second poll fallback.
  */
 export function registerTriggerCommands(program: Command): void {
   const trigger = program
@@ -14,9 +19,7 @@ export function registerTriggerCommands(program: Command): void {
 
   trigger
     .command("create")
-    .description(
-      "Create a new trigger. The daemon picks up cron schedules automatically via fs-watch; webhook triggers are usable as soon as the file lands.",
-    )
+    .description("Create a new trigger.")
     .requiredOption(
       "--type <type>",
       "'cron' or 'webhook'",
@@ -32,53 +35,58 @@ export function registerTriggerCommands(program: Command): void {
     .option("--timezone <tz>", "timezone for cron triggers")
     .option("--namespace <ns>", "namespace (defaults to action's namespace)")
     .action(async (flags) => {
-      await runLocalStoreCmd(async (store) => {
-        // Resolve namespace the same way the tool handler did: fall
-        // back to the action's namespace if unspecified.
-        let namespace = flags.namespace as string | undefined;
-        if (!namespace) {
-          const action = await store.actions.get(flags.action);
-          if (!action) {
-            process.stderr.write(`cue: action ${flags.action} not found\n`);
-            process.exit(1);
-          }
-          namespace = action.namespace;
-        }
-        const config =
-          flags.type === "cron"
-            ? (() => {
-                if (!flags.schedule) {
-                  process.stderr.write(
-                    "cue trigger: --schedule is required for cron triggers\n",
-                  );
-                  process.exit(1);
-                }
-                return {
-                  schedule: flags.schedule as string,
-                  ...(flags.timezone
-                    ? { timezone: flags.timezone as string }
-                    : {}),
-                };
-              })()
-            : ({} as Record<string, never>);
-        const created = await store.triggers.create({
-          type: flags.type,
-          actionId: flags.action,
-          namespace,
-          config,
-        });
-        const out: Record<string, unknown> = {
-          id: created.id,
-          type: created.type,
-          actionId: created.actionId,
-          namespace: created.namespace,
-        };
-        if (created.type === "webhook" && created.config.type === "webhook") {
-          out.webhookUrl = `${localBaseUrl()}/w/${created.id}`;
-          out.webhookToken = created.config.token;
-        }
-        printJson(out);
+      const { baseUrl, token } = daemonEndpoint();
+      // Resolve namespace via the daemon — fall back to the action's
+      // namespace if unspecified.
+      let namespace = flags.namespace as string | undefined;
+      if (!namespace) {
+        const action = await getJson<{ namespace: string }>(
+          `${baseUrl}/admin/actions/${flags.action}`,
+          token,
+        );
+        namespace = action.namespace;
+      }
+      const config =
+        flags.type === "cron"
+          ? (() => {
+              if (!flags.schedule) {
+                process.stderr.write(
+                  "cue trigger: --schedule is required for cron triggers\n",
+                );
+                process.exit(1);
+              }
+              return {
+                schedule: flags.schedule as string,
+                ...(flags.timezone
+                  ? { timezone: flags.timezone as string }
+                  : {}),
+              };
+            })()
+          : ({} as Record<string, never>);
+      const created = await postJson<{
+        id: string;
+        type: "cron" | "webhook";
+        actionId: string;
+        namespace: string;
+        config: { type: string; token?: string };
+        webhookUrl?: string;
+      }>(`${baseUrl}/admin/triggers`, token, {
+        type: flags.type,
+        actionId: flags.action,
+        namespace,
+        config,
       });
+      const out: Record<string, unknown> = {
+        id: created.id,
+        type: created.type,
+        actionId: created.actionId,
+        namespace: created.namespace,
+      };
+      if (created.type === "webhook" && created.config.type === "webhook") {
+        out.webhookUrl = created.webhookUrl;
+        out.webhookToken = created.config.token;
+      }
+      printJson(out);
     });
 
   trigger
@@ -87,37 +95,26 @@ export function registerTriggerCommands(program: Command): void {
     .option("--namespace <ns>", "filter by namespace")
     .option("-a, --action <id>", "filter by action id")
     .action(async (flags) => {
-      await runLocalStoreCmd(async (store) => {
-        const filter: { namespace?: string; actionId?: string } = {};
-        if (flags.namespace) filter.namespace = flags.namespace;
-        if (flags.action) filter.actionId = flags.action;
-        printJson(await store.triggers.list(filter));
-      });
+      const { baseUrl, token } = daemonEndpoint();
+      const url = new URL(`${baseUrl}/admin/triggers`);
+      if (flags.namespace) url.searchParams.set("namespace", flags.namespace);
+      if (flags.action) url.searchParams.set("actionId", flags.action);
+      printJson(await getJson(url.toString(), token));
     });
 
   trigger
     .command("get <id>")
     .description("Return a trigger record.")
     .action(async (id) => {
-      await runLocalStoreCmd(async (store) => {
-        const rec = await store.triggers.get(id);
-        if (!rec) {
-          process.stderr.write(`cue: trigger ${id} not found\n`);
-          process.exit(1);
-        }
-        printJson(rec);
-      });
+      const { baseUrl, token } = daemonEndpoint();
+      printJson(await getJson(`${baseUrl}/admin/triggers/${id}`, token));
     });
 
   trigger
     .command("delete <id>")
-    .description(
-      "Delete a trigger. The daemon cancels any cron schedule via fs-watch within ~150ms.",
-    )
+    .description("Delete a trigger.")
     .action(async (id) => {
-      await runLocalStoreCmd(async (store) => {
-        await store.triggers.delete(id);
-        printJson({ deleted: id });
-      });
+      const { baseUrl, token } = daemonEndpoint();
+      printJson(await deleteJson(`${baseUrl}/admin/triggers/${id}`, token));
     });
 }

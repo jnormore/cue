@@ -46,7 +46,7 @@ describe("invokeAction", () => {
 
   beforeEach(async () => {
     home = mkdtempSync(join(tmpdir(), "cue-invoke-"));
-    store = pickStore("fs", { home });
+    store = pickStore("sqlite", { home });
     state = makeTestState(home);
     action = await store.actions.create({
       name: "hello",
@@ -55,7 +55,9 @@ describe("invokeAction", () => {
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await store.close();
+    await state.close();
     rmSync(home, { recursive: true, force: true });
   });
 

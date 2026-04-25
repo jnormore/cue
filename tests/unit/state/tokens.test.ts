@@ -1,12 +1,14 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { fsNamespaceTokens } from "../../../src/state/fs/tokens.js";
 import {
   type NamespaceTokenStore,
   parseTokenNamespace,
+  pickState,
+  type StateAdapter,
 } from "../../../src/state/index.js";
+import { pickStore } from "../../../src/store/index.js";
 
 describe("parseTokenNamespace", () => {
   it("extracts the namespace from a well-formed token", () => {
@@ -23,25 +25,27 @@ describe("parseTokenNamespace", () => {
   });
 });
 
-describe("fsNamespaceTokens", () => {
+describe("sqlite namespace tokens store", () => {
   let home: string;
+  let state: StateAdapter;
   let tokens: NamespaceTokenStore;
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "cue-toks-"));
-    tokens = fsNamespaceTokens(home);
+    pickStore("sqlite", { home }).close();
+    state = pickState("sqlite", { home });
+    tokens = state.tokens;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await state.close();
     rmSync(home, { recursive: true, force: true });
   });
 
   describe("resolveOrCreate", () => {
-    it("mints a stk_<namespace>.<hex> token on first call, persists it", async () => {
+    it("mints a stk_<namespace>.<hex> token on first call", async () => {
       const token = await tokens.resolveOrCreate("shop");
       expect(token).toMatch(/^stk_shop\.[0-9a-f]{64}$/);
-      const path = join(home, "state", "tokens", "shop");
-      expect(readFileSync(path, "utf8")).toBe(token);
     });
 
     it("returns the same token on subsequent calls", async () => {
@@ -50,10 +54,13 @@ describe("fsNamespaceTokens", () => {
       expect(a).toBe(b);
     });
 
-    it("stores with mode 0600", async () => {
-      await tokens.resolveOrCreate("shop");
-      const st = statSync(join(home, "state", "tokens", "shop"));
-      expect(st.mode & 0o777).toBe(0o600);
+    it("survives reopens", async () => {
+      const a = await tokens.resolveOrCreate("shop");
+      await state.close();
+      state = pickState("sqlite", { home });
+      tokens = state.tokens;
+      const b = await tokens.resolveOrCreate("shop");
+      expect(a).toBe(b);
     });
   });
 
@@ -74,7 +81,7 @@ describe("fsNamespaceTokens", () => {
       expect(await tokens.verify("stk_only")).toBeNull();
     });
 
-    it("returns null when the namespace has no token file", async () => {
+    it("returns null when the namespace has no token", async () => {
       const fake = "stk_unknown." + "ab".repeat(32);
       expect(await tokens.verify(fake)).toBeNull();
     });
@@ -82,9 +89,9 @@ describe("fsNamespaceTokens", () => {
 
   describe("deleteNamespace", () => {
     it("removes the namespace's token", async () => {
-      await tokens.resolveOrCreate("shop");
+      const token = await tokens.resolveOrCreate("shop");
       await tokens.deleteNamespace("shop");
-      expect(existsSync(join(home, "state", "tokens", "shop"))).toBe(false);
+      expect(await tokens.verify(token)).toBeNull();
     });
 
     it("is a no-op when the namespace had no token", async () => {
@@ -93,9 +100,9 @@ describe("fsNamespaceTokens", () => {
 
     it("does not touch other namespaces", async () => {
       await tokens.resolveOrCreate("shop");
-      await tokens.resolveOrCreate("weather");
+      const weatherToken = await tokens.resolveOrCreate("weather");
       await tokens.deleteNamespace("shop");
-      expect(existsSync(join(home, "state", "tokens", "weather"))).toBe(true);
+      expect(await tokens.verify(weatherToken)).toBe("weather");
     });
   });
 });

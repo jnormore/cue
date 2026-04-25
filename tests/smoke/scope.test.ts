@@ -48,7 +48,7 @@ describe("agent-token scope enforcement", () => {
 
   beforeAll(async () => {
     home = mkdtempSync(join(tmpdir(), "cue-scope-smoke-"));
-    store = pickStore("fs", { home });
+    store = pickStore("sqlite", { home });
 
     const runtime: ActionRuntime = {
       name: "mock",
@@ -134,20 +134,22 @@ describe("agent-token scope enforcement", () => {
     });
   });
 
-  describe("no /admin surface exists", () => {
-    it("every /admin/* path 404s (routes were removed)", async () => {
-      for (const path of [
-        "/admin/doctor",
-        "/admin/agent-tokens",
-        "/admin/actions",
-        "/admin/triggers",
-        "/admin/namespaces/shop",
-      ]) {
-        const r = await fetch(`${baseUrl}${path}`, {
-          headers: { authorization: `Bearer ${MASTER}` },
-        });
-        expect(r.status).toBe(404);
-      }
+  describe("/admin surface auth", () => {
+    it("/admin/* requires the master token; agent tokens are rejected", async () => {
+      // Agent token (shopToken) must not work on admin routes.
+      const r = await fetch(`${baseUrl}/admin/actions`, {
+        headers: { authorization: `Bearer ${shopToken}` },
+      });
+      expect(r.status).toBe(401);
+    });
+
+    it("/admin/* responds for the master token (200 list, even if empty)", async () => {
+      const r = await fetch(`${baseUrl}/admin/agent-tokens`, {
+        headers: { authorization: `Bearer ${MASTER}` },
+      });
+      expect(r.status).toBe(200);
+      const body = (await r.json()) as unknown[];
+      expect(Array.isArray(body)).toBe(true);
     });
   });
 

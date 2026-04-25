@@ -21,20 +21,22 @@ describe("pickStore", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it("returns the fs adapter for 'fs'", () => {
-    const adapter = pickStore("fs", { home });
-    expect(adapter.name).toBe("fs");
+  it("returns the sqlite adapter for 'sqlite'", async () => {
+    const adapter = pickStore("sqlite", { home });
+    expect(adapter.name).toBe("sqlite");
     expect(adapter.actions).toBeDefined();
     expect(adapter.triggers).toBeDefined();
     expect(adapter.runs).toBeDefined();
+    expect(adapter.namespaces).toBeDefined();
+    await adapter.close();
   });
 
   it("throws on unknown adapter name", () => {
-    expect(() => pickStore("sqlite", { home })).toThrow(/Unknown store/);
+    expect(() => pickStore("nope", { home })).toThrow(/Unknown store/);
   });
 });
 
-describe("fs adapter doctor", () => {
+describe("sqlite adapter doctor", () => {
   let home: string;
 
   beforeEach(() => {
@@ -46,10 +48,10 @@ describe("fs adapter doctor", () => {
   });
 
   it("returns ok:true when home is writable", async () => {
-    const adapter = pickStore("fs", { home });
+    const adapter = pickStore("sqlite", { home });
     const result = await adapter.doctor();
     expect(result.ok).toBe(true);
-    expect(result.details.path).toBe(home);
+    await adapter.close();
   });
 });
 
@@ -59,10 +61,11 @@ describe("cascade helpers", () => {
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "cue-cascade-"));
-    adapter = pickStore("fs", { home });
+    adapter = pickStore("sqlite", { home });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await adapter.close();
     rmSync(home, { recursive: true, force: true });
   });
 

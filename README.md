@@ -19,19 +19,20 @@ But durable work needs somewhere to live. Not a conversation context that evapor
 
 ## Features
 
-- **Actions** — named JS snippets stored on disk, invoked on demand, each call runs in a fresh unikernel
+- **Actions** — named JS snippets, invoked on demand, each call runs in a fresh unikernel
 - **Triggers** — `cron` and `webhook`, managed by the daemon, fire actions with captured input
 - **Addressable** — every action gets a stable `http://<host>:<port>/a/<id>` invoke URL + bearer token so UIs, webhooks, and humans can call it
 - **MCP server** — stdio _and_ streamable-HTTP transports, same tool surface, one daemon. Local agents over stdio; remote/multi-tenant over HTTP.
 - **Policy** (inherited from unitask) — per-action `allowNet`, `allowTcp`, `secrets`, `files`, `dirs`, `timeoutSeconds`, `memoryMb`. Project-root `.cue.toml` sets the ceiling; effective policy = intersection.
-- **Namespaces** — flat action/trigger lists with an optional `namespace` tag. `cue ns delete <name>` tears the whole thing down.
-- **Run records** — every invocation logs stdout, stderr, exit, input, trigger id, and the unitask run id at `~/.cue/runs/<id>/`
+- **Namespaces** — every action, trigger, secret, and state entry is namespace-scoped. `cue ns delete <name>` tears the whole thing down.
+- **Storage** — SQLite for metadata, local disk for run blobs. Postgres + S3-compatible adapters designed for fleet, not yet shipped. See [docs/storage.md](./docs/storage.md).
+- **Run records** — every invocation captures stdout, stderr, exit, input, trigger id, and the unitask run id; metadata in SQL, output bytes in `~/.cue/blobs/runs/<id>/`.
 - **`doctor`** — verifies unitask is on PATH, the daemon is up, the port is reachable
 
 ## Prereqs
 
 - [unitask](https://github.com/jnormore/unitask) on PATH (`unitask doctor` green)
-- Node.js ≥ 20
+- Node.js ≥ 22.5 (uses `node:sqlite`)
 
 ## Install
 
@@ -52,7 +53,7 @@ Leave it running — terminal pane, tmux, launchd, systemd, your call. Everythin
 
 Binds to `127.0.0.1` by default — local agents over stdio need nothing more. For a remote or shared daemon, bind to a routable interface with `--host`, terminate TLS at a reverse proxy, and give each client a scoped agent token (see [Agent tokens](#agent-tokens)). `/mcp` refuses the master token, so an exposed daemon can't be taken over by a misconfigured client.
 
-The daemon generates a master token at `~/.cue/token` (mode 0600) on first start. It is the operator's credential for the two things that need authentication: `POST /a/:id` (action invocation) and `/state/:ns/:key` (state log reads/writes). All other operator work happens by editing `~/.cue/` directly — the `cue` CLI does this for you, and the daemon's `fs.watch` picks up any change within ~150ms. **`/mcp` does not accept the master token**; every MCP client must carry a scoped agent token minted via `cue token create` (see [Agent tokens](#agent-tokens)). This split means a misconfigured agent client cannot silently run as operator. Webhook triggers and state logs have their own scoped tokens.
+The daemon generates a master token at `~/.cue/token` (mode 0600) on first start. It is the operator's credential for `POST /a/:id` (action invocation), `/state/:ns/:key` (state log), and `/admin/*` (operator CRUD on actions, triggers, secrets, agent tokens, namespaces). The `cue` CLI uses it to talk to the daemon — every operator command is an authenticated HTTP call; the daemon owns the database. **`/mcp` does not accept the master token**; every MCP client must carry a scoped agent token minted via `cue token create` (see [Agent tokens](#agent-tokens)). This split means a misconfigured agent client cannot silently run as operator. Webhook triggers and state logs have their own scoped tokens.
 
 ## Use via MCP
 
@@ -63,7 +64,9 @@ cue mcp config claude-code       # → JSON snippet + the path it goes in
 cue mcp config claude-desktop    # also: cursor, vscode-copilot
 ```
 
-Every invocation auto-mints a fresh agent token bound to a brand-new per-client sandbox namespace (e.g. `claude-code-01kpz7abcd`). The agent can only touch that namespace — no other namespace in `~/.cue/` is visible to it. The emitted snippet's header comment reports the sandbox name so you can find it via `cue token list`.
+Every invocation auto-mints a fresh agent token bound to a brand-new per-client sandbox namespace (e.g. `claude-code-01kpz7abcd`). The agent can only touch that namespace — no other namespace is visible to it. The emitted snippet's header comment reports the sandbox name so you can find it via `cue token list`.
+
+`cue mcp config` requires a running daemon (it mints the token via the daemon's admin API). Run `cue serve` first.
 
 For a stdio client:
 
@@ -146,11 +149,11 @@ For operator-style tooling (minting tokens, managing all namespaces, invoking ac
 - `delete_namespace(name)` — cascades actions, triggers, secrets, state
 - `doctor()`
 
-Operator-only operations (minting/revoking agent tokens) happen locally via the `cue` CLI, which writes to `~/.cue/` directly — they are not MCP tools and have no HTTP route. See [Agent tokens](#agent-tokens).
+Operator-only operations (minting/revoking agent tokens, cascading namespace deletes, secret CRUD) go through the daemon's `/admin/*` HTTP surface, master-token gated. The `cue` CLI is a thin client over those routes — never an MCP tool. See [Agent tokens](#agent-tokens).
 
 ### Secrets
 
-Secrets are **scoped to a namespace** and stored at `~/.cue/secrets/<namespace>/<name>` (mode 0600). The daemon's own `process.env` is never forwarded — the only way a value reaches an action's unikernel is `set_secret` + a matching `policy.secrets` entry on the action. Cross-namespace reads are prohibited: an action in `namespace: "evil"` cannot resolve `shop/SHOPIFY_TOKEN`.
+Secrets are **scoped to a namespace** and stored on the daemon (rows in the `secrets` table, encrypted at rest is a future Cloud-day-2 concern — see [docs/storage.md](./docs/storage.md)). The daemon's own `process.env` is never forwarded — the only way a value reaches an action's unikernel is `set_secret` + a matching `policy.secrets` entry on the action. Cross-namespace reads are prohibited: an action in `namespace: "evil"` cannot resolve `shop/SHOPIFY_TOKEN`.
 
 Typical agent-driven flow:
 
@@ -176,7 +179,7 @@ await state.delete("orders"); // wipe one key
 
 All calls are implicitly scoped to the action's namespace — the helper carries a per-namespace token and the daemon enforces that the URL's namespace matches. An action in `ns: evil` cannot read `ns: shop`'s log.
 
-Storage is backed by a `StateAdapter`, picked the same way as the store/runtime/cron adapters (`CUE_STATE=fs` by default, `.cue.toml` key `state = "fs"`). The `fs` adapter writes to `~/.cue/state/logs/<namespace>/<key>.ndjson` with monotonic `seq` per key, and keeps per-namespace tokens at `~/.cue/state/tokens/<namespace>` (mode 0600). Concurrent appends within a single daemon serialize via a per-key in-process mutex. For scale-out, swap the fs adapter for a Redis or Postgres adapter without touching action code — the interface doesn't change.
+Storage is backed by a `StateAdapter`, picked the same way as the store/runtime/cron adapters (`CUE_STATE=sqlite` by default, `.cue.toml` key `state = "sqlite"`). The SQLite adapter shares the daemon's `cue.db` file with the main store; appends compute `MAX(seq) + 1` inside a write transaction so concurrent writers serialize through the SQL write lock. Each entry is capped at 64KB — larger payloads should go through the blob store with a reference in the entry. For fleet/scale-out, swap to a Postgres adapter without touching action code; the interface doesn't change. See [docs/storage.md](./docs/storage.md).
 
 From outside a unikernel (agents pre-seeding, debugging, inspection) use the `state_append` / `state_read` / `state_delete` MCP tools or the `/state/:namespace/:key` HTTP routes. `delete_namespace` cascades state (logs + tokens) along with actions, triggers, and secrets.
 
@@ -184,21 +187,21 @@ From outside a unikernel (agents pre-seeding, debugging, inspection) use the `st
 
 cue has two principal types:
 
-| Principal  | Bearer           | Where it's honored                                                   | Used by                                                |
-| ---------- | ---------------- | -------------------------------------------------------------------- | ------------------------------------------------------ |
-| **master** | `~/.cue/token`   | `POST /a/:id`, `/state/:ns/:key`, and filesystem access to `~/.cue/` | the local `cue` CLI, operator scripts                  |
-| **agent**  | `atk_<id>.<hex>` | `/mcp`, `POST /a/:id`, `/state/:ns/:key`                             | MCP clients (Claude Desktop, Claude Code, Cursor, ...) |
+| Principal  | Bearer           | Where it's honored                                                | Used by                                                |
+| ---------- | ---------------- | ----------------------------------------------------------------- | ------------------------------------------------------ |
+| **master** | `~/.cue/token`   | `POST /a/:id`, `/state/:ns/:key`, `/admin/*`                      | the local `cue` CLI, operator scripts                  |
+| **agent**  | `atk_<id>.<hex>` | `/mcp`, `POST /a/:id`, `/state/:ns/:key`                          | MCP clients (Claude Desktop, Claude Code, Cursor, ...) |
 
-**The master token is not accepted on `/mcp`.** Every MCP client must carry a scoped agent token — there is no way to configure an agent to run as the operator. There is no master-only HTTP surface; master's power comes from filesystem ownership of `~/.cue/`, which the OS gates (the token file is mode 0600).
+**The master token is not accepted on `/mcp`.** Every MCP client must carry a scoped agent token — there is no way to configure an agent to run as the operator. The master token gates the `/admin/*` operator surface, which is what the `cue` CLI uses; agent tokens are explicitly rejected there.
 
 An agent token is a scoped bearer bound to an explicit namespace allowlist. When an MCP client authenticates with one, the daemon:
 
 - **Filters** `list_actions` / `list_triggers` to the in-scope namespaces.
 - **Returns `NotFound`** for `get_action` / `invoke_action` / `inspect_run` / `list_action_runs` / `get_trigger` / `delete_action` / `delete_trigger` / `update_action` on records whose namespace is out of scope — existence is hidden, not just access.
 - **Returns `Forbidden`** on `create_action` / `create_trigger` / `set_secret` / `state_append` / `state_read` / `state_delete` / `delete_namespace` targeting an out-of-scope namespace.
-- **Never exposes** agent-token CRUD over MCP — minting and revoking happen via the local `cue token` CLI, which writes to `~/.cue/agent-tokens/` directly.
+- **Never exposes** agent-token CRUD over MCP — minting and revoking happen via the local `cue token` CLI, which calls the daemon's `/admin/agent-tokens` route with the master token.
 
-Mint one (CLI writes to `~/.cue/agent-tokens/<id>.json`; no daemon required):
+Mint one (the daemon must be running):
 
 ```bash
 cue token create --namespace shop --namespace weather --label "claude-desktop"
@@ -224,32 +227,31 @@ cue token delete atk_01K...
 
 Revocation is immediate — the token's next MCP or HTTP request returns 401.
 
-Storage: `~/.cue/agent-tokens/<id>.json` (mode 0600). Cross-adapter: the `AgentTokenStore` interface lives under `StoreAdapter` alongside `SecretStore`, so a future non-fs store adapter slots in without changing call sites. Tokens use constant-time compare on verify to avoid timing leaks.
+Storage: an `agent_tokens` row in `~/.cue/cue.db`. Cross-adapter: the `AgentTokenStore` interface lives under `StoreAdapter` alongside `SecretStore`, so the Postgres adapter slots in without changing call sites. Tokens use constant-time compare on verify to avoid timing leaks.
 
 **Webhook tokens are orthogonal.** A webhook trigger's scoped token gates _one_ specific trigger's URL and is unaffected by any agent-token scope. A webhook firing into `shop/order-created` still works even if the caller has no agent-token scope for `shop`.
 
-#### Operator model: daemon as observer of disk
+#### Operator model: daemon owns the database
 
-Operators don't RPC to the daemon. They mutate `~/.cue/` directly (via the `cue` CLI or any file-writing tool) and the daemon **watches its own store** for changes. Specifically:
+The daemon is the only process that touches `~/.cue/cue.db`. The CLI is a thin HTTP client.
 
-- **CLI → filesystem, directly.** Every `cue action`, `cue trigger`, `cue token`, `cue secret`, `cue ns` command opens the store adapter in-process and writes JSON files under `~/.cue/`. No HTTP hop. No running daemon required. `cue action list` works with the daemon stopped; `cue token create` mints a token and writes it to disk regardless of whether `cue serve` is up.
-- **Daemon `fs.watch`es its trigger directory.** When a trigger file appears or disappears (because the CLI created/deleted it, or because a `delete_namespace` cascade wiped a subset), the daemon's `CronRegistry` reconciles within ~150ms — scheduling new crons, cancelling vanished ones. No "tell the daemon about this change" RPC exists; the daemon reads fresh from disk.
-- **Action invocation uses `/a/:id`.** The one operation that genuinely needs the daemon (spawn a unikernel, stream output, record a run) goes through the same route agents use. Master token works there too.
-- **`cue doctor` runs local.** Instantiates each adapter in-process and calls its `doctor()` probe. Separately pings `/health` (unauth) to report daemon liveness. Works with no daemon running — `daemonUp: false` is a valid result.
+- **CLI → daemon HTTP, every command.** Every `cue action`, `cue trigger`, `cue token`, `cue secret`, `cue ns` command sends an authenticated request to the daemon's `/admin/*` routes using the master token at `~/.cue/token`. The daemon must be running.
+- **Cron reconciliation is in-process.** When the daemon mutates a trigger (via `/admin/triggers`), the in-process `Subscribers` notify the cron registry synchronously; a 1-second poll covers any out-of-process write (future fleet peers, manual DB edits). No `fs.watch`.
+- **Action invocation uses `/a/:id`.** The one operation that has always been daemon-only (spawn a unikernel, stream output, record a run) is unchanged. Master token works there too.
+- **`cue doctor` runs local.** Instantiates each adapter in-process and calls its `doctor()` probe (read-only on the DB). Separately pings `/health` (unauth) to report daemon liveness. Works with no daemon running — `daemonUp: false` is a valid result.
 
 **The complete HTTP surface:**
 
-| Route                      | Auth                                                     | Purpose                        |
-| -------------------------- | -------------------------------------------------------- | ------------------------------ |
-| `GET /health`              | none                                                     | liveness probe                 |
-| `POST /a/:id`              | master **or** agent (scoped)                             | invoke an action               |
-| `POST /w/:id`              | webhook token (per-trigger)                              | fire a webhook                 |
-| `/state/:ns/:key[/append]` | master **or** state-token (scoped) **or** agent (scoped) | append-log I/O                 |
-| `/mcp`                     | agent only — **master rejected**                         | MCP streamable-HTTP for agents |
+| Route                      | Auth                                                     | Purpose                                  |
+| -------------------------- | -------------------------------------------------------- | ---------------------------------------- |
+| `GET /health`              | none                                                     | liveness probe                           |
+| `POST /a/:id`              | master **or** agent (scoped)                             | invoke an action                         |
+| `POST /w/:id`              | webhook token (per-trigger)                              | fire a webhook                           |
+| `/state/:ns/:key[/append]` | master **or** state-token (scoped) **or** agent (scoped) | append-log I/O                           |
+| `/admin/*`                 | master only — **agent rejected**                         | operator CRUD (actions, triggers, …)     |
+| `/mcp`                     | agent only — **master rejected**                         | MCP streamable-HTTP for agents           |
 
-There is no master-gated HTTP surface. The operator's power comes from filesystem access — the OS already gates that via `~/.cue/` ownership and the 0600 mode on `~/.cue/token`. If a process can read those files, it's the operator; if it can't, it isn't.
-
-If you're writing operator tooling in another language: **write to `~/.cue/`** for storage-level changes (schema is stable; see `src/store/fs/` for the exact layout), and **POST to `/a/:id`** with the master token for action invocation. That's it.
+If you're writing operator tooling in another language, the mental model is: **POST to `/admin/*`** with the master token for storage operations, **POST to `/a/:id`** with the master token (or any agent token in scope) for action invocation. The on-disk database schema is an implementation detail — don't write to it directly.
 
 ## CLI quickstart
 
@@ -285,12 +287,12 @@ cue reads configuration from three places: CLI flags on `cue serve`, environment
 
 | Variable          | What it does                                            | Default                                    |
 | ----------------- | ------------------------------------------------------- | ------------------------------------------ |
-| `CUE_HOME`        | State directory (token, port, actions, triggers, runs). | `~/.cue`                                   |
+| `CUE_HOME`        | State directory (token, port, cue.db, blobs).           | `~/.cue`                                   |
 | `CUE_PORT`        | Daemon port.                                            | `4747`, or last value in `<CUE_HOME>/port` |
 | `CUE_RUNTIME`     | Runtime adapter. Shipped: `unitask`.                    | `unitask`                                  |
-| `CUE_STORE`       | Store adapter. Shipped: `fs`.                           | `fs`                                       |
+| `CUE_STORE`       | Store adapter. Shipped: `sqlite`.                       | `sqlite`                                   |
 | `CUE_CRON`        | Cron scheduler. Shipped: `node-cron`.                   | `node-cron`                                |
-| `CUE_STATE`       | State adapter. Shipped: `fs`.                           | `fs`                                       |
+| `CUE_STATE`       | State adapter. Shipped: `sqlite`.                       | `sqlite`                                   |
 | `CUE_UNITASK_BIN` | Path to the `unitask` binary.                           | resolved via `PATH`                        |
 
 ### `cue serve` flags
@@ -319,9 +321,9 @@ The same file can pin adapter selection for the project:
 
 ```toml
 runtime = "unitask"
-store   = "fs"
+store   = "sqlite"
 cron    = "node-cron"
-state   = "fs"
+state   = "sqlite"
 ```
 
 ## Tests

@@ -70,7 +70,7 @@ describe("server", () => {
 
   beforeEach(async () => {
     home = mkdtempSync(join(tmpdir(), "cue-server-"));
-    store = pickStore("fs", { home });
+    store = pickStore("sqlite", { home });
     const rt = makeRuntime();
     runtime = rt.runtime;
     runMock = rt.run;
@@ -89,6 +89,7 @@ describe("server", () => {
 
   afterEach(async () => {
     await app.close();
+    await store.close();
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -255,10 +256,11 @@ describe("server CORS", () => {
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "cue-cors-"));
-    store = pickStore("fs", { home });
+    store = pickStore("sqlite", { home });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await store.close();
     rmSync(home, { recursive: true, force: true });
   });
 

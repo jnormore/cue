@@ -40,7 +40,7 @@
     "verify": "npm run typecheck && npm run build && npm test && npm run smoke && npm run cli"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",

@@ -40,7 +40,7 @@ describe("daemon smoke", () => {
 
   beforeAll(async () => {
     home = mkdtempSync(join(tmpdir(), "cue-smoke-"));
-    store = pickStore("fs", { home });
+    store = pickStore("sqlite", { home });
 
     runMock = vi.fn().mockImplementation(async () => ({
       stdout: '{"ran":true}',
@@ -225,15 +225,17 @@ describe("daemon smoke", () => {
     expect(res.status).toBe(401);
   });
 
-  it("fs-watch picks up new cron trigger and fires it within a few seconds", async () => {
+  it("trigger.subscribe reconciles new cron trigger and fires it within a few seconds", async () => {
     const before = runMock.mock.calls.length;
     const action = await store.actions.create({
       name: "every-second",
       code: "console.log(Date.now())",
       namespace: "smoke-cron",
     });
-    // Writing the trigger file is all we do — the daemon's fs-watch
-    // reconciler picks it up and schedules the cron handle.
+    // Inserting the trigger row is all we do — the in-process
+    // subscription notifies the cron registry, which schedules a
+    // handle. The 1-second poll fallback would also catch this if
+    // the subscription missed it.
     await store.triggers.create({
       type: "cron",
       actionId: action.id,
@@ -247,8 +249,8 @@ describe("daemon smoke", () => {
     }
     expect(runMock.mock.calls.length).toBeGreaterThan(before);
 
-    // Teardown via the store: delete the namespace's artifacts.
-    // fs-watch cancels the cron schedule when the trigger file goes.
+    // Teardown via the cascade — the cron registry cancels the
+    // schedule when the trigger row goes.
     await cascadeDeleteNamespace(store, state, "smoke-cron");
   });
 

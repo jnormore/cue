@@ -2,19 +2,26 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { StoreError, type TriggerStore } from "../../../src/store/index.js";
-import { fsTriggers } from "../../../src/store/fs/triggers.js";
+import {
+  StoreError,
+  type StoreAdapter,
+  type TriggerStore,
+  pickStore,
+} from "../../../src/store/index.js";
 
-describe("fsTriggers", () => {
+describe("sqlite triggers store", () => {
   let home: string;
+  let store: StoreAdapter;
   let triggers: TriggerStore;
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "cue-triggers-"));
-    triggers = fsTriggers(home);
+    store = pickStore("sqlite", { home });
+    triggers = store.triggers;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await store.close();
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -132,6 +139,55 @@ describe("fsTriggers", () => {
       await expect(triggers.delete("trg_ZZZ")).rejects.toMatchObject({
         kind: "NotFound",
       });
+    });
+  });
+
+  describe("subscribe", () => {
+    it("fires on create and delete", async () => {
+      let count = 0;
+      const sub = triggers.subscribe(() => {
+        count += 1;
+      });
+      const t = await triggers.create({
+        type: "webhook",
+        actionId: "act_abc",
+        namespace: "default",
+        config: {},
+      });
+      await triggers.delete(t.id);
+      sub.close();
+      expect(count).toBe(2);
+    });
+
+    it("close unsubscribes", async () => {
+      let count = 0;
+      const sub = triggers.subscribe(() => {
+        count += 1;
+      });
+      sub.close();
+      await triggers.create({
+        type: "webhook",
+        actionId: "act_abc",
+        namespace: "default",
+        config: {},
+      });
+      expect(count).toBe(0);
+    });
+  });
+
+  describe("claimFire", () => {
+    it("returns true when the trigger exists", async () => {
+      const t = await triggers.create({
+        type: "cron",
+        actionId: "act_abc",
+        namespace: "default",
+        config: { schedule: "* * * * *" },
+      });
+      expect(await triggers.claimFire(t.id, 5000)).toBe(true);
+    });
+
+    it("returns false when the trigger does not exist", async () => {
+      expect(await triggers.claimFire("trg_ZZZ", 5000)).toBe(false);
     });
   });
 });

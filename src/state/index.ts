@@ -4,13 +4,20 @@ import {
   StoreError,
   validateNamespace,
 } from "../store/index.js";
-import { fsStateAdapter } from "./fs/adapter.js";
+import { sqliteStateAdapter } from "./sql/sqlite/adapter.js";
 
 export const KEY_MAX = 128;
 const KEY_RE = /^[a-z0-9-]+$/;
 
 const TOKEN_PREFIX = "stk_";
 const TOKEN_RANDOM_BYTES = 32;
+
+/**
+ * Maximum size (bytes, JSON-serialized) for a single state log entry.
+ * Larger payloads bloat the row store; callers should put bytes in the
+ * blob store and keep a reference in the entry.
+ */
+export const ENTRY_MAX_BYTES = 64 * 1024;
 
 export function validateKey(key: string): void {
   if (!key || key.length > KEY_MAX || !KEY_RE.test(key)) {
@@ -20,6 +27,25 @@ export function validateKey(key: string): void {
       { key },
     );
   }
+}
+
+/**
+ * Throws ValidationError if the JSON-serialized entry exceeds
+ * ENTRY_MAX_BYTES. Returns the serialized string so the caller can
+ * reuse it for the actual write — avoids serializing twice.
+ */
+export function validateEntrySize(entry: unknown): string {
+  const serialized = JSON.stringify(entry);
+  // Byte length, not character length — multibyte characters count for more.
+  const bytes = Buffer.byteLength(serialized, "utf8");
+  if (bytes > ENTRY_MAX_BYTES) {
+    throw new StoreError(
+      "ValidationError",
+      `State log entry is ${bytes} bytes, exceeds ${ENTRY_MAX_BYTES} byte cap`,
+      { bytes, maxBytes: ENTRY_MAX_BYTES },
+    );
+  }
+  return serialized;
 }
 
 export interface LogEntry {
@@ -101,11 +127,11 @@ export interface StatePickOpts {
 
 export function pickState(name: string, opts: StatePickOpts): StateAdapter {
   switch (name) {
-    case "fs":
-      return fsStateAdapter(opts.home);
+    case "sqlite":
+      return sqliteStateAdapter(opts.home);
     default:
       throw new Error(
-        `Unknown state adapter: "${name}". Known adapters: fs`,
+        `Unknown state adapter: "${name}". Known adapters: sqlite`,
       );
   }
 }

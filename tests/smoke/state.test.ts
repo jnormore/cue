@@ -33,7 +33,7 @@ describe("state smoke", () => {
 
   beforeAll(async () => {
     home = mkdtempSync(join(tmpdir(), "cue-state-smoke-"));
-    store = pickStore("fs", { home });
+    store = pickStore("sqlite", { home });
 
     const runtime: ActionRuntime = {
       name: "mock",

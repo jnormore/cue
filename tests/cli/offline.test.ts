@@ -35,73 +35,11 @@ describe("cue CLI (offline — no daemon required)", () => {
     }
   });
 
-  describe("cue mcp config", () => {
+  describe("cue mcp config — surface checks that don't need the daemon", () => {
     it("exits 1 on unknown client", () => {
       const r = run(["mcp", "config", "not-a-client"]);
       expect(r.status).toBe(1);
       expect(r.stderr).toContain("unknown client");
-    });
-
-    it("claude-code emits a copy-paste-ready `claude mcp add` command", () => {
-      const home = mkdtempSync(join(tmpdir(), "cue-cli-mcpconfig-"));
-      try {
-        const r = run(["mcp", "config", "claude-code"], { CUE_HOME: home });
-        expect(r.status).toBe(0);
-        expect(r.stdout).toMatch(
-          /# Sandbox namespace minted for this client: claude-code-[0-9a-z]+/,
-        );
-        // Command line, not JSON. One line with the real token inlined.
-        const cmdLine = r.stdout
-          .split("\n")
-          .find((l) => l.startsWith("claude mcp add cue"));
-        expect(cmdLine).toBeDefined();
-        expect(cmdLine).toMatch(
-          /^claude mcp add cue -- cue mcp --token atk_[0-9A-Z]+\.[0-9a-f]{64}$/,
-        );
-        // Output must NOT contain a JSON mcpServers block.
-        expect(r.stdout).not.toMatch(/"mcpServers"/);
-      } finally {
-        rmSync(home, { recursive: true, force: true });
-      }
-    });
-
-    it("claude-desktop emits a JSON snippet (static config file client)", () => {
-      const home = mkdtempSync(join(tmpdir(), "cue-cli-mcpconfig-"));
-      try {
-        const r = run(["mcp", "config", "claude-desktop"], { CUE_HOME: home });
-        expect(r.status).toBe(0);
-        const parsed = JSON.parse(
-          r.stdout
-            .split("\n")
-            .filter((l) => !l.startsWith("#") && l.length > 0)
-            .join("\n"),
-        ) as { mcpServers: { cue: { args: string[] } } };
-        const args = parsed.mcpServers.cue.args;
-        expect(args).toEqual([
-          "mcp",
-          "--token",
-          expect.stringMatching(/^atk_[0-9A-Z]+\.[0-9a-f]{64}$/),
-        ]);
-      } finally {
-        rmSync(home, { recursive: true, force: true });
-      }
-    });
-
-    it("each invocation produces a distinct namespace + token", () => {
-      const home = mkdtempSync(join(tmpdir(), "cue-cli-mcpconfig-"));
-      try {
-        const a = run(["mcp", "config", "claude-code"], { CUE_HOME: home });
-        const b = run(["mcp", "config", "claude-code"], { CUE_HOME: home });
-        expect(a.status).toBe(0);
-        expect(b.status).toBe(0);
-        const nsA = /minted for this client: (\S+)/.exec(a.stdout)?.[1];
-        const nsB = /minted for this client: (\S+)/.exec(b.stdout)?.[1];
-        expect(nsA).toBeDefined();
-        expect(nsB).toBeDefined();
-        expect(nsA).not.toBe(nsB);
-      } finally {
-        rmSync(home, { recursive: true, force: true });
-      }
     });
   });
 
@@ -115,9 +53,9 @@ describe("cue CLI (offline — no daemon required)", () => {
     });
 
     it("cue doctor with no daemon still succeeds (adapter probes are local, reports daemonUp: false)", () => {
-      // doctor is fully local now — it probes each adapter in-process
-      // and only pings /health for daemon liveness. No daemon → that
-      // ping fails, but the command itself completes normally.
+      // doctor probes each adapter in-process and only pings /health for
+      // daemon liveness. No daemon → that ping fails, but the command
+      // itself completes normally.
       const r = run(["doctor"], { CUE_HOME: home });
       expect(r.status).toBe(0);
       const body = JSON.parse(r.stdout) as {
@@ -139,18 +77,19 @@ describe("cue CLI (offline — no daemon required)", () => {
       expect(r.stderr).toMatch(/daemon|reach|token/i);
     });
 
-    it("cue action list with no daemon succeeds (pure disk read, empty)", () => {
-      // Storage-only commands don't require the daemon anymore — the
-      // CLI reads straight from `~/.cue/actions`. No entries → [].
+    it("cue action list with no daemon fails fast with a clear message", () => {
+      // Storage commands now go through the daemon's HTTP admin API.
+      // Without a daemon, the CLI surfaces the missing token / unreachable
+      // daemon error rather than silently succeeding against a stale view.
       const r = run(["action", "list"], { CUE_HOME: home });
-      expect(r.status).toBe(0);
-      expect(JSON.parse(r.stdout)).toEqual([]);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/daemon|reach|token/i);
     });
 
-    it("cue token list with no daemon succeeds (pure disk read)", () => {
+    it("cue token list with no daemon fails fast with a clear message", () => {
       const r = run(["token", "list"], { CUE_HOME: home });
-      expect(r.status).toBe(0);
-      expect(JSON.parse(r.stdout)).toEqual([]);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/daemon|reach|token/i);
     });
   });
 

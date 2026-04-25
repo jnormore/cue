@@ -1,23 +1,27 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   type ActionStore,
   StoreError,
+  pickStore,
+  type StoreAdapter,
 } from "../../../src/store/index.js";
-import { fsActions } from "../../../src/store/fs/actions.js";
 
-describe("fsActions", () => {
+describe("sqlite actions store", () => {
   let home: string;
+  let store: StoreAdapter;
   let actions: ActionStore;
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "cue-actions-"));
-    actions = fsActions(home);
+    store = pickStore("sqlite", { home });
+    actions = store.actions;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await store.close();
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -32,19 +36,17 @@ describe("fsActions", () => {
       expect(rec.createdAt).toBe(rec.updatedAt);
     });
 
-    it("persists code.js, policy.toml, meta.json on disk", async () => {
+    it("persists policy fields and round-trips them via get", async () => {
       const rec = await actions.create({
         name: "hello",
         code: "console.log(1)",
         policy: { timeoutSeconds: 10, allowNet: ["api.github.com"] },
       });
-      const dir = join(home, "actions", rec.id);
-      expect(readFileSync(join(dir, "code.js"), "utf8")).toBe("console.log(1)");
-      const meta = JSON.parse(readFileSync(join(dir, "meta.json"), "utf8"));
-      expect(meta.name).toBe("hello");
-      const toml = readFileSync(join(dir, "policy.toml"), "utf8");
-      expect(toml).toContain("timeoutSeconds = 10");
-      expect(toml).toContain("api.github.com");
+      const fetched = await actions.get(rec.id);
+      expect(fetched?.policy).toEqual({
+        timeoutSeconds: 10,
+        allowNet: ["api.github.com"],
+      });
     });
 
     it("accepts explicit namespace", async () => {
@@ -168,10 +170,9 @@ describe("fsActions", () => {
   });
 
   describe("delete", () => {
-    it("removes the action dir", async () => {
+    it("removes the action", async () => {
       const rec = await actions.create({ name: "hello", code: "x" });
       await actions.delete(rec.id);
-      expect(existsSync(join(home, "actions", rec.id))).toBe(false);
       expect(await actions.get(rec.id)).toBeNull();
     });
 
