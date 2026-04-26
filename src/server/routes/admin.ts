@@ -3,13 +3,19 @@ import {
   type ActionPatch,
   deleteAction as cascadeDeleteAction,
   deleteNamespace as cascadeDeleteNamespace,
+  DEFAULT_NAMESPACE,
+  type NamespacePatch,
+  type NamespaceRecord,
   type Policy,
+  StoreError,
   type StoreAdapter,
   type TriggerCreateInput,
   type TriggerRecord,
+  validateNamespace,
 } from "../../store/index.js";
 import type { StateAdapter } from "../../state/index.js";
 import { masterAuth } from "../auth.js";
+import { assertNamespaceMutable } from "../namespace-status.js";
 
 export interface AdminRoutesOpts {
   store: StoreAdapter;
@@ -55,10 +61,12 @@ function registerActionRoutes(
   app.post<{
     Body: { name: string; code: string; namespace?: string; policy?: Policy };
   }>("/admin/actions", async (req) => {
+    const namespace = req.body.namespace ?? DEFAULT_NAMESPACE;
+    await assertNamespaceMutable(opts.store, namespace);
     const created = await opts.store.actions.create({
       name: req.body.name,
       code: req.body.code,
-      ...(req.body.namespace ? { namespace: req.body.namespace } : {}),
+      namespace,
       ...(req.body.policy ? { policy: req.body.policy } : {}),
     });
     return { ...created, invokeUrl: opts.invokeUrlFor(created.id) };
@@ -84,7 +92,16 @@ function registerActionRoutes(
 
   app.patch<{ Params: { id: string }; Body: ActionPatch }>(
     "/admin/actions/:id",
-    async (req) => {
+    async (req, reply) => {
+      const existing = await opts.store.actions.get(req.params.id);
+      if (!existing) {
+        reply.code(404).send({
+          error: `Action ${req.params.id} not found`,
+          kind: "NotFound",
+        });
+        return;
+      }
+      await assertNamespaceMutable(opts.store, existing.namespace);
       return opts.store.actions.update(req.params.id, req.body);
     },
   );
@@ -122,6 +139,7 @@ function registerTriggerRoutes(
   opts: AdminRoutesOpts,
 ): void {
   app.post<{ Body: TriggerCreateInput }>("/admin/triggers", async (req) => {
+    await assertNamespaceMutable(opts.store, req.body.namespace);
     const created = await opts.store.triggers.create(req.body);
     return decorateTrigger(created, opts);
   });
@@ -181,6 +199,7 @@ function registerSecretRoutes(
     Params: { namespace: string; name: string };
     Body: { value: string };
   }>("/admin/secrets/:namespace/:name", async (req) => {
+    await assertNamespaceMutable(opts.store, req.params.namespace);
     await opts.store.secrets.set(
       req.params.namespace,
       req.params.name,
@@ -240,6 +259,81 @@ function registerNamespaceRoutes(
   app: Parameters<FastifyPluginAsync>[0],
   opts: AdminRoutesOpts,
 ): void {
+  app.post<{
+    Body: { name: string; displayName?: string; description?: string };
+  }>("/admin/namespaces", async (req) => {
+    validateNamespace(req.body.name);
+    const existing = await opts.store.namespaces.get(req.body.name);
+    if (existing) {
+      throw new StoreError(
+        "NameCollision",
+        `Namespace "${req.body.name}" already exists`,
+        { existing: existing.name },
+      );
+    }
+    const now = new Date().toISOString();
+    const record: NamespaceRecord = {
+      name: req.body.name,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+    if (req.body.displayName !== undefined)
+      record.displayName = req.body.displayName;
+    if (req.body.description !== undefined)
+      record.description = req.body.description;
+    return opts.store.namespaces.upsert(record);
+  });
+
+  app.get("/admin/namespaces", async () => {
+    const list = await opts.store.namespaces.list();
+    // Decorate with rough resource counts so `cue ns list` can show
+    // them without a follow-up query per row.
+    const [actions, triggers] = await Promise.all([
+      opts.store.actions.list(),
+      opts.store.triggers.list(),
+    ]);
+    return list.map((ns) => ({
+      ...ns,
+      actionCount: actions.filter((a) => a.namespace === ns.name).length,
+      triggerCount: triggers.filter((t) => t.namespace === ns.name).length,
+    }));
+  });
+
+  app.get<{ Params: { name: string } }>(
+    "/admin/namespaces/:name",
+    async (req, reply) => {
+      const ns = await opts.store.namespaces.get(req.params.name);
+      if (!ns) {
+        reply.code(404).send({
+          error: `Namespace "${req.params.name}" not found`,
+          kind: "NotFound",
+        });
+        return;
+      }
+      const [actions, triggers, secretNames, stateKeys] = await Promise.all([
+        opts.store.actions.list({ namespace: req.params.name }),
+        opts.store.triggers.list({ namespace: req.params.name }),
+        opts.store.secrets.list(req.params.name),
+        opts.state.log.list(req.params.name),
+      ]);
+      return {
+        ...ns,
+        actionCount: actions.length,
+        triggerCount: triggers.length,
+        secretCount: secretNames.length,
+        stateKeyCount: stateKeys.length,
+      };
+    },
+  );
+
+  app.patch<{ Params: { name: string }; Body: NamespacePatch }>(
+    "/admin/namespaces/:name",
+    async (req) => {
+      return opts.store.namespaces.update(req.params.name, req.body);
+    },
+  );
+
   app.delete<{ Params: { name: string } }>(
     "/admin/namespaces/:name",
     async (req) => {

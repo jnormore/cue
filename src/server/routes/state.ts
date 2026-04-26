@@ -2,6 +2,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import type { StateAdapter } from "../../state/index.js";
 import type { StoreAdapter } from "../../store/index.js";
 import { authenticate, extractBearer } from "../auth.js";
+import { assertNamespaceMutable } from "../namespace-status.js";
 
 export interface StateRouteOpts {
   state: StateAdapter;
@@ -68,6 +69,10 @@ export function stateRoutes(opts: StateRouteOpts): FastifyPluginAsync {
       if (!(await requireAuth(req, reply, opts, namespace))) return;
       const body = (req.body ?? {}) as { entry?: unknown };
       const entry = "entry" in body ? body.entry : null;
+      // Mutation gate: archive blocks state-log appends. Pause does
+      // not — pause only stops invocations, and a paused namespace's
+      // already-running unikernel might still be flushing state.
+      await assertNamespaceMutable(opts.store, namespace);
       try {
         return await opts.state.log.append(namespace, key, entry ?? null);
       } catch (err) {

@@ -5,6 +5,7 @@ import type { CronScheduler } from "../cron/index.js";
 import { CronRegistry } from "../cron/registry.js";
 import type { InvokeDeps } from "../invoke.js";
 import type { McpToolDeps } from "./mcp-tools.js";
+import { bootstrapNamespaces } from "./bootstrap.js";
 import { actionsRoutes } from "./routes/actions.js";
 import { adminRoutes } from "./routes/admin.js";
 import { healthRoutes } from "./routes/health.js";
@@ -38,6 +39,11 @@ export interface BuiltServer {
 }
 
 export async function buildServer(opts: BuildServerOpts): Promise<BuiltServer> {
+  // Synthesize namespace metadata rows for any namespace referenced by
+  // an existing action or trigger but missing its `namespaces` record.
+  // Idempotent; safe to run on every boot.
+  await bootstrapNamespaces(opts.store);
+
   const app = fastify({
     logger: opts.logger ?? false,
     forceCloseConnections: true,
@@ -93,7 +99,10 @@ export async function buildServer(opts: BuildServerOpts): Promise<BuiltServer> {
           ? 404
           : err.kind === "NameCollision"
             ? 409
-            : 400;
+            : err.kind === "NamespacePaused" ||
+                err.kind === "NamespaceArchived"
+              ? 423
+              : 400;
       reply.code(status).send({
         error: err.message,
         kind: err.kind,

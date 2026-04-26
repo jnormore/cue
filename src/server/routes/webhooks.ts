@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import { type InvokeDeps, type InvokeEnvelope, invokeAction } from "../../invoke.js";
 import { extractBearer } from "../auth.js";
+import { assertNamespaceActive } from "../namespace-status.js";
 
 export function webhookRoutes(deps: InvokeDeps): FastifyPluginAsync {
   return async (app) => {
@@ -30,6 +31,9 @@ export function webhookRoutes(deps: InvokeDeps): FastifyPluginAsync {
           reply.code(404).send({ error: `Action ${trigger.actionId} not found` });
           return;
         }
+        // Throws StoreError(NamespacePaused | NamespaceArchived);
+        // Fastify's setErrorHandler maps both to 423.
+        await assertNamespaceActive(deps.store, action.namespace);
         const envelope: InvokeEnvelope = {
           trigger: {
             type: "webhook",

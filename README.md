@@ -24,7 +24,7 @@ But durable work needs somewhere to live. Not a conversation context that evapor
 - **Addressable** — every action gets a stable `http://<host>:<port>/a/<id>` invoke URL + bearer token so UIs, webhooks, and humans can call it
 - **MCP server** — stdio _and_ streamable-HTTP transports, same tool surface, one daemon. Local agents over stdio; remote/multi-tenant over HTTP.
 - **Policy** (inherited from unitask) — per-action `allowNet`, `allowTcp`, `secrets`, `files`, `dirs`, `timeoutSeconds`, `memoryMb`. Project-root `.cue.toml` sets the ceiling; effective policy = intersection.
-- **Namespaces** — every action, trigger, secret, and state entry is namespace-scoped. `cue ns delete <name>` tears the whole thing down.
+- **Namespaces** — first-class isolation boundary with lifecycle (`active | paused | archived`). Every action, trigger, secret, and state entry is namespace-scoped. `cue ns create | list | inspect | pause | resume | archive | delete` covers the full lifecycle; `pause` stops invocations without deleting state, `archive` is read-only/frozen, `delete` cascades.
 - **Storage** — SQLite for metadata, local disk for run blobs. Postgres + S3-compatible adapters designed for fleet, not yet shipped. See [docs/storage.md](./docs/storage.md).
 - **Run records** — every invocation captures stdout, stderr, exit, input, trigger id, and the unitask run id; metadata in SQL, output bytes in `~/.cue/blobs/runs/<id>/`.
 - **`doctor`** — verifies unitask is on PATH, the daemon is up, the port is reachable
@@ -146,7 +146,9 @@ For operator-style tooling (minting tokens, managing all namespaces, invoking ac
 - `state_append(namespace, key, entry)` → `{ seq, at }` — append to a namespace's shared log (see [State](#state))
 - `state_read(namespace, key, since?, limit?)` → `{ entries, lastSeq }`
 - `state_delete(namespace, key)`
+- `get_namespace(name)` / `update_namespace(name, patch)` — read or relabel (displayName/description). Status changes are operator-only.
 - `delete_namespace(name)` — cascades actions, triggers, secrets, state
+- `whoami()` → `{ principal, namespaces[{name, status, displayName?}] }` — what this token can touch and the lifecycle status of each namespace
 - `doctor()`
 
 Operator-only operations (minting/revoking agent tokens, cascading namespace deletes, secret CRUD) go through the daemon's `/admin/*` HTTP surface, master-token gated. The `cue` CLI is a thin client over those routes — never an MCP tool. See [Agent tokens](#agent-tokens).
@@ -253,31 +255,39 @@ The daemon is the only process that touches `~/.cue/cue.db`. The CLI is a thin H
 
 If you're writing operator tooling in another language, the mental model is: **POST to `/admin/*`** with the master token for storage operations, **POST to `/a/:id`** with the master token (or any agent token in scope) for action invocation. The on-disk database schema is an implementation detail — don't write to it directly.
 
-## CLI quickstart
+## CLI
 
-`cue` is a usable CLI on its own.
+The CLI is intentionally narrow. **Apps are authored by agents through MCP, not by humans through the CLI.** The `cue` command is for running and configuring the daemon — nothing more. There are deliberately no `cue action create` / `cue trigger create` / `cue secret set` commands; those would mirror the MCP surface and tell the wrong story.
+
+What the CLI covers:
 
 ```bash
-# one action, one cron trigger, one namespace — a daily greeting
-cue action create --name hello --namespace demo \
-  --code 'console.log("hi at", new Date().toISOString())'
+# start the daemon (leave running)
+cue serve
 
-cue trigger create --type cron --action <id> --schedule "0 9 * * *"
+# wire your MCP client — auto-mints a sandbox token + namespace
+cue mcp config claude-code        # also: claude-desktop, cursor, vscode-copilot, ...
 
-# an action behind a webhook, callable from anywhere with the token
-cue action create --name echo --namespace demo \
-  --code-file echo.js
-cue trigger create --type webhook --action <id>
-# → http://localhost:4747/w/<triggerId>  (token in response)
+# health check
+cue doctor
 
-# invoke directly
-cue action invoke <id> --input '{"name":"world"}'
+# operator: see what's running on the daemon
+cue ns list
+cue ns inspect demo
 
-# tear down
+# operator: pause / resume / archive / delete a namespace
+cue ns pause demo
+cue ns resume demo
+cue ns archive demo
 cue ns delete demo
+
+# operator: mint an explicit-namespace token (instead of auto-sandbox)
+cue token create --namespace shop --label "shopify-team"
+cue token list
+cue token delete atk_01K…
 ```
 
-Everything else: `cue --help`, `cue action --help`, `cue trigger --help`.
+Everything an agent does — creating actions, attaching triggers, setting secrets, invoking — happens via MCP tools. See the [MCP tools](#mcp-tools) section.
 
 ## Configuration
 

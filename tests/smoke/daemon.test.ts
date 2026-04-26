@@ -117,6 +117,7 @@ describe("daemon smoke", () => {
         "delete_trigger",
         "doctor",
         "get_action",
+        "get_namespace",
         "get_trigger",
         "inspect_run",
         "invoke_action",
@@ -128,6 +129,8 @@ describe("daemon smoke", () => {
         "state_delete",
         "state_read",
         "update_action",
+        "update_namespace",
+        "whoami",
       ].sort(),
     );
   });

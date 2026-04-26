@@ -8,6 +8,8 @@ import {
   type ActionSummary,
   type CronConfig,
   DEFAULT_NAMESPACE,
+  type NamespaceRecord,
+  type NamespaceStatus,
   StoreError,
   type TriggerRecord,
   deleteAction as cascadeDeleteAction,
@@ -19,6 +21,10 @@ import {
   validateSecretName,
 } from "../store/index.js";
 import { type Principal, requireNamespace } from "./auth.js";
+import {
+  assertNamespaceActive,
+  assertNamespaceMutable,
+} from "./namespace-status.js";
 
 export interface McpToolDeps extends InvokeDeps {
   cronScheduler: CronScheduler;
@@ -69,6 +75,7 @@ export async function createAction(
 ): Promise<ActionRef> {
   const namespace = args.namespace ?? DEFAULT_NAMESPACE;
   requireNamespace(deps.principal, namespace, "create action in");
+  await assertNamespaceMutable(deps.store, namespace);
   const action = await deps.store.actions.create({
     name: args.name,
     code: args.code,
@@ -92,6 +99,7 @@ export async function updateAction(
       id: args.id,
     });
   }
+  await assertNamespaceMutable(deps.store, existing.namespace);
   const updated = await deps.store.actions.update(args.id, args.patch);
   return toActionRef(deps, updated);
 }
@@ -123,6 +131,9 @@ export async function invokeActionTool(
       id: args.id,
     });
   }
+  // Surfaces NamespacePaused / NamespaceArchived to the MCP client so
+  // the agent can see why their invoke failed and offer to resume.
+  await assertNamespaceActive(deps.store, action.namespace);
   return invokeAction(deps, action, {
     trigger: null,
     input: args.input ?? null,
@@ -232,6 +243,7 @@ export async function createTrigger(
   }
   const namespace = args.namespace ?? action.namespace;
   requireNamespace(deps.principal, namespace, "create trigger in");
+  await assertNamespaceMutable(deps.store, namespace);
   const config =
     args.type === "cron"
       ? {
@@ -330,6 +342,88 @@ export async function deleteNamespaceTool(
   };
 }
 
+export interface WhoamiNamespace {
+  name: string;
+  status: NamespaceStatus;
+  displayName?: string;
+  description?: string;
+}
+
+export interface WhoamiResult {
+  /** "master" → operator credential; "agent" → scoped agent token. */
+  principal: "master" | "agent";
+  /**
+   * Namespaces this caller can touch. For master, every namespace
+   * with a metadata row. For an agent, every namespace in the token's
+   * scope — including a synthesized active stub for any in-scope
+   * namespace that doesn't yet have a metadata row (brand-new
+   * sandboxes, pre-bootstrap upgrades).
+   */
+  namespaces: WhoamiNamespace[];
+}
+
+function toWhoamiNamespace(rec: NamespaceRecord): WhoamiNamespace {
+  const out: WhoamiNamespace = { name: rec.name, status: rec.status };
+  if (rec.displayName !== undefined) out.displayName = rec.displayName;
+  if (rec.description !== undefined) out.description = rec.description;
+  return out;
+}
+
+export async function whoami(deps: McpToolDeps): Promise<WhoamiResult> {
+  if (deps.principal.type === "master") {
+    const all = await deps.store.namespaces.list();
+    return { principal: "master", namespaces: all.map(toWhoamiNamespace) };
+  }
+  const out: WhoamiNamespace[] = [];
+  for (const name of deps.principal.scope.namespaces) {
+    const existing = await deps.store.namespaces.get(name);
+    if (existing) {
+      out.push(toWhoamiNamespace(existing));
+    } else {
+      // No metadata row yet — synthesize an active stub. Mirrors how
+      // assertNamespaceActive treats missing rows.
+      out.push({ name, status: "active" });
+    }
+  }
+  return { principal: "agent", namespaces: out };
+}
+
+export async function getNamespace(
+  deps: McpToolDeps,
+  args: { name: string },
+): Promise<NamespaceRecord> {
+  requireNamespace(deps.principal, args.name, "read");
+  const ns = await deps.store.namespaces.get(args.name);
+  if (!ns) {
+    throw new StoreError(
+      "NotFound",
+      `Namespace "${args.name}" not found`,
+      { name: args.name },
+    );
+  }
+  return ns;
+}
+
+export async function updateNamespaceTool(
+  deps: McpToolDeps,
+  args: {
+    name: string;
+    patch: { displayName?: string | null; description?: string | null };
+  },
+): Promise<NamespaceRecord> {
+  requireNamespace(deps.principal, args.name, "update");
+  // Status changes are operator-only — agents may only update labels
+  // (`displayName`, `description`). The MCP surface deliberately
+  // excludes `status` from this tool's contract; an agent that wants
+  // to pause a namespace asks the user to do it via CLI.
+  const patch: { displayName?: string | null; description?: string | null } = {};
+  if (args.patch.displayName !== undefined)
+    patch.displayName = args.patch.displayName;
+  if (args.patch.description !== undefined)
+    patch.description = args.patch.description;
+  return deps.store.namespaces.update(args.name, patch);
+}
+
 export async function setSecret(
   deps: McpToolDeps,
   args: { namespace: string; name: string; value: string },
@@ -337,6 +431,7 @@ export async function setSecret(
   validateNamespace(args.namespace);
   validateSecretName(args.name);
   requireNamespace(deps.principal, args.namespace, "write secrets in");
+  await assertNamespaceMutable(deps.store, args.namespace);
   await deps.store.secrets.set(args.namespace, args.name, args.value);
   return { ok: true, namespace: args.namespace, name: args.name };
 }
@@ -348,6 +443,7 @@ export async function appendState(
   validateNamespace(args.namespace);
   validateKey(args.key);
   requireNamespace(deps.principal, args.namespace, "append state in");
+  await assertNamespaceMutable(deps.store, args.namespace);
   return deps.state.log.append(args.namespace, args.key, args.entry);
 }
 

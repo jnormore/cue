@@ -12,6 +12,7 @@ import {
   deleteTrigger,
   doctor,
   getAction,
+  getNamespace,
   getTrigger,
   inspectRun,
   invokeActionTool,
@@ -23,6 +24,8 @@ import {
   appendState,
   setSecret,
   updateAction,
+  updateNamespaceTool,
+  whoami,
 } from "./mcp-tools.js";
 
 const PolicyShape = z
@@ -268,6 +271,42 @@ export function buildMcpServer(deps: McpToolDeps): McpServer {
       inputSchema: { name: z.string() },
     },
     (args) => wrap(() => deleteNamespaceTool(deps, args)),
+  );
+
+  server.registerTool(
+    "get_namespace",
+    {
+      description:
+        "Read a namespace's metadata record (status, displayName, description, timestamps). Useful for an agent to detect that its namespace is paused/archived before invoking and surface that to the user.",
+      inputSchema: { name: z.string() },
+    },
+    (args) => wrap(() => getNamespace(deps, args)),
+  );
+
+  server.registerTool(
+    "whoami",
+    {
+      description:
+        "Returns the caller's principal type ('master' | 'agent') and the list of namespaces they can touch — each entry includes status, so the agent can detect paused/archived namespaces before attempting to invoke. For an agent, this enumerates the token's scope; for master, every namespace.",
+      inputSchema: {},
+    },
+    () => wrap(() => whoami(deps)),
+  );
+
+  server.registerTool(
+    "update_namespace",
+    {
+      description:
+        "Update a namespace's labels (displayName, description). Status changes (pause/resume/archive) are operator-only — they go through the CLI/admin API, not MCP.",
+      inputSchema: {
+        name: z.string(),
+        patch: z.object({
+          displayName: z.string().nullable().optional(),
+          description: z.string().nullable().optional(),
+        }),
+      },
+    },
+    (args) => wrap(() => updateNamespaceTool(deps, args)),
   );
 
   server.registerTool(

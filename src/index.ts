@@ -1,14 +1,11 @@
 #!/usr/bin/env node
 import { Command, Option } from "commander";
-import { registerActionCommands } from "./commands/action.js";
 import { registerDoctorCommand } from "./commands/doctor.js";
 import { runMcpBridge } from "./commands/mcp.js";
 import { registerMcpConfigCommand } from "./commands/mcp-config.js";
 import { registerNsCommands } from "./commands/ns.js";
-import { registerSecretCommands } from "./commands/secret.js";
 import { runServe } from "./commands/serve.js";
 import { registerTokenCommands } from "./commands/token.js";
-import { registerTriggerCommands } from "./commands/trigger.js";
 
 const VERSION = "0.1.0";
 
@@ -75,10 +72,7 @@ const mcpCmd = program
   });
 
 registerMcpConfigCommand(mcpCmd);
-registerActionCommands(program);
-registerTriggerCommands(program);
 registerTokenCommands(program);
-registerSecretCommands(program);
 registerNsCommands(program);
 registerDoctorCommand(program);
 

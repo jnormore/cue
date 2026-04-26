@@ -20,19 +20,19 @@ describe("cue CLI (offline — no daemon required)", () => {
     expect(r.stdout.trim()).toBe("0.1.0");
   });
 
-  it("cue --help lists every top-level subcommand", () => {
+  it("cue --help lists the operator-only subcommand set", () => {
+    // The CLI is intentionally narrow: serve + mcp bridge + ns lifecycle +
+    // operator token mint + doctor. Apps are authored by agents through
+    // MCP, not by humans through the CLI.
     const r = run(["--help"]);
     expect(r.status).toBe(0);
-    for (const cmd of [
-      "serve",
-      "mcp",
-      "action",
-      "trigger",
-      "ns",
-      "doctor",
-    ]) {
+    for (const cmd of ["serve", "mcp", "token", "ns", "doctor"]) {
       expect(r.stdout).toContain(cmd);
     }
+    // Agent-shaped commands must NOT appear — they're MCP-only.
+    expect(r.stdout).not.toMatch(/^\s*action\s/m);
+    expect(r.stdout).not.toMatch(/^\s*trigger\s/m);
+    expect(r.stdout).not.toMatch(/^\s*secret\s/m);
   });
 
   describe("cue mcp config — surface checks that don't need the daemon", () => {
@@ -68,42 +68,32 @@ describe("cue CLI (offline — no daemon required)", () => {
       expect(body.state.ok).toBe(true);
     });
 
-    it("cue action invoke with no daemon fails fast with a clear message", () => {
-      const r = run(
-        ["action", "invoke", "act_does_not_exist"],
-        { CUE_HOME: home },
-      );
-      expect(r.status).toBe(1);
-      expect(r.stderr).toMatch(/daemon|reach|token/i);
-    });
-
-    it("cue action list with no daemon fails fast with a clear message", () => {
-      // Storage commands now go through the daemon's HTTP admin API.
-      // Without a daemon, the CLI surfaces the missing token / unreachable
-      // daemon error rather than silently succeeding against a stale view.
-      const r = run(["action", "list"], { CUE_HOME: home });
-      expect(r.status).toBe(1);
-      expect(r.stderr).toMatch(/daemon|reach|token/i);
-    });
-
     it("cue token list with no daemon fails fast with a clear message", () => {
+      // Operator commands route through the daemon's HTTP admin API.
+      // Without a daemon, the CLI surfaces a missing-token / unreachable
+      // error rather than silently returning empty.
       const r = run(["token", "list"], { CUE_HOME: home });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/daemon|reach|token/i);
+    });
+
+    it("cue ns list with no daemon fails fast with a clear message", () => {
+      const r = run(["ns", "list"], { CUE_HOME: home });
       expect(r.status).toBe(1);
       expect(r.stderr).toMatch(/daemon|reach|token/i);
     });
   });
 
   describe("arg validation", () => {
-    it("cue action create without --name exits non-zero", () => {
-      const r = run(["action", "create", "--code", "x"]);
+    it("cue token create without --namespace exits non-zero", () => {
+      const r = run(["token", "create"]);
       expect(r.status).not.toBe(0);
-      expect(r.stderr).toMatch(/name|required/i);
+      expect(r.stderr).toMatch(/namespace|required/i);
     });
 
-    it("cue trigger create with bogus --type exits non-zero", () => {
-      const r = run(["trigger", "create", "--type", "bogus", "--action", "x"]);
+    it("cue ns delete without a name exits non-zero", () => {
+      const r = run(["ns", "delete"]);
       expect(r.status).not.toBe(0);
-      expect(r.stderr).toMatch(/type|cron|webhook/i);
     });
   });
 });

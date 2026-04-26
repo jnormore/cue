@@ -84,52 +84,6 @@ describe.skipIf(!unitaskAvailable)(
       );
     });
 
-    it("full lifecycle: action create → list → trigger create → ns delete", () => {
-      const create = cue([
-        "action",
-        "create",
-        "--name",
-        "cli-hello",
-        "--code",
-        'console.log("hi")',
-        "--namespace",
-        "cli-test",
-      ]);
-      expect(create.status).toBe(0);
-      const action = JSON.parse(create.stdout);
-      expect(action.id).toMatch(/^act_/);
-      expect(action.namespace).toBe("cli-test");
-      expect(action.invokeUrl).toMatch(/^http:\/\/127\.0\.0\.1:/);
-
-      const list = cue(["action", "list", "--namespace", "cli-test"]);
-      expect(list.status).toBe(0);
-      const listed = JSON.parse(list.stdout);
-      expect(listed).toHaveLength(1);
-      expect(listed[0].id).toBe(action.id);
-
-      const trg = cue([
-        "trigger",
-        "create",
-        "--type",
-        "webhook",
-        "--action",
-        action.id,
-      ]);
-      expect(trg.status).toBe(0);
-      const trigger = JSON.parse(trg.stdout);
-      expect(trigger.webhookUrl).toMatch(/^http:\/\/127\.0\.0\.1:.*\/w\//);
-      expect(trigger.webhookToken).toMatch(/^tok_[0-9a-f]{64}$/);
-
-      const del = cue(["ns", "delete", "cli-test"]);
-      expect(del.status).toBe(0);
-      const deleted = JSON.parse(del.stdout);
-      expect(deleted.deleted.actions).toContain(action.id);
-      expect(deleted.deleted.triggers).toContain(trigger.id);
-
-      const empty = cue(["action", "list", "--namespace", "cli-test"]);
-      expect(JSON.parse(empty.stdout)).toEqual([]);
-    });
-
     it("cue mcp config auto-mints a sandbox token and emits an HTTP snippet", () => {
       // Claude Desktop's config only accepts stdio servers, so --http emits
       // an `mcp-remote` bridge rather than a native url+headers snippet.
@@ -215,53 +169,58 @@ describe.skipIf(!unitaskAvailable)(
       expect(tokA).not.toBe(tokB);
     });
 
-    it("cue trigger list filters by --action", () => {
-      const a = JSON.parse(
-        cue([
-          "action",
-          "create",
-          "--name",
-          "filter-a",
-          "--code",
-          "x",
-          "--namespace",
-          "cli-filter",
-        ]).stdout,
-      );
-      const b = JSON.parse(
-        cue([
-          "action",
-          "create",
-          "--name",
-          "filter-b",
-          "--code",
-          "y",
-          "--namespace",
-          "cli-filter",
-        ]).stdout,
-      );
-      cue([
-        "trigger",
+    it("cue ns lifecycle: create → inspect → pause → resume → archive → delete", () => {
+      const created = cue([
+        "ns",
         "create",
-        "--type",
-        "webhook",
-        "--action",
-        a.id,
+        "lc-cli",
+        "--display-name",
+        "Lifecycle CLI test",
+        "--description",
+        "exercising every transition",
       ]);
-      cue([
-        "trigger",
-        "create",
-        "--type",
-        "webhook",
-        "--action",
-        b.id,
-      ]);
-      const forA = JSON.parse(
-        cue(["trigger", "list", "--action", a.id]).stdout,
+      expect(created.status).toBe(0);
+      const rec = JSON.parse(created.stdout);
+      expect(rec.name).toBe("lc-cli");
+      expect(rec.status).toBe("active");
+      expect(rec.displayName).toBe("Lifecycle CLI test");
+
+      const list = cue(["ns", "list"]);
+      expect(list.status).toBe(0);
+      const all = JSON.parse(list.stdout) as Array<{
+        name: string;
+        actionCount: number;
+      }>;
+      const found = all.find((n) => n.name === "lc-cli");
+      expect(found).toBeDefined();
+      expect(found?.actionCount).toBe(0);
+
+      const inspected = cue(["ns", "inspect", "lc-cli"]);
+      expect(inspected.status).toBe(0);
+      const detail = JSON.parse(inspected.stdout);
+      expect(detail.name).toBe("lc-cli");
+      expect(detail.actionCount).toBe(0);
+      expect(detail.triggerCount).toBe(0);
+
+      expect(cue(["ns", "pause", "lc-cli"]).status).toBe(0);
+      expect(JSON.parse(cue(["ns", "inspect", "lc-cli"]).stdout).status).toBe(
+        "paused",
       );
-      expect(forA).toHaveLength(1);
-      expect(forA[0].actionId).toBe(a.id);
-      cue(["ns", "delete", "cli-filter"]);
+
+      expect(cue(["ns", "resume", "lc-cli"]).status).toBe(0);
+      expect(JSON.parse(cue(["ns", "inspect", "lc-cli"]).stdout).status).toBe(
+        "active",
+      );
+
+      expect(cue(["ns", "archive", "lc-cli"]).status).toBe(0);
+      expect(JSON.parse(cue(["ns", "inspect", "lc-cli"]).stdout).status).toBe(
+        "archived",
+      );
+
+      // Cascade-delete works on archived namespaces.
+      expect(cue(["ns", "delete", "lc-cli"]).status).toBe(0);
+      const after = cue(["ns", "inspect", "lc-cli"]);
+      expect(after.status).not.toBe(0);
     });
   },
 );

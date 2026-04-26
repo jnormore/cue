@@ -1,5 +1,10 @@
 import { type InvokeDeps, invokeAction } from "../invoke.js";
-import type { TriggerRecord, TriggerSubscription } from "../store/index.js";
+import { assertNamespaceActive } from "../server/namespace-status.js";
+import {
+  StoreError,
+  type TriggerRecord,
+  type TriggerSubscription,
+} from "../store/index.js";
 import type { CronHandle, CronScheduler } from "./index.js";
 
 export interface ScheduledCron {
@@ -175,6 +180,20 @@ export class CronRegistry {
     if (!t) return;
     const a = await this.deps.store.actions.get(t.actionId);
     if (!a) return;
+    // Cron silently no-ops on paused/archived namespaces. The next
+    // scheduled tick will check again, so resuming the namespace
+    // restarts firing without an explicit reload.
+    try {
+      await assertNamespaceActive(this.deps.store, a.namespace);
+    } catch (err) {
+      if (
+        err instanceof StoreError &&
+        (err.kind === "NamespacePaused" || err.kind === "NamespaceArchived")
+      ) {
+        return;
+      }
+      throw err;
+    }
     await invokeAction(this.deps, a, {
       trigger: {
         type: "cron",

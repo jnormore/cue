@@ -109,7 +109,12 @@ export interface RunFinishInput {
   finishedAt: string;
 }
 
-export type StoreErrorKind = "NotFound" | "NameCollision" | "ValidationError";
+export type StoreErrorKind =
+  | "NotFound"
+  | "NameCollision"
+  | "ValidationError"
+  | "NamespacePaused"
+  | "NamespaceArchived";
 
 export class StoreError extends Error {
   readonly kind: StoreErrorKind;
@@ -409,6 +414,10 @@ export async function deleteNamespace(
   const stateKeys = await state.log.list(namespace);
   await state.log.deleteNamespace(namespace);
   await state.tokens.deleteNamespace(namespace);
+  // Last: drop the metadata row. Doing this last means a partial
+  // failure leaves the metadata in place so the cascade can be
+  // retried; the metadata is the bookkeeping for the contents below.
+  await store.namespaces.delete(namespace);
   return {
     actions: nsActions.map((a) => a.id),
     triggers: toKill.map((t) => t.id),
