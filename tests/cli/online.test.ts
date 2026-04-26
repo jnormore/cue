@@ -84,7 +84,7 @@ describe.skipIf(!unitaskAvailable)(
       );
     });
 
-    it("cue mcp config auto-mints a sandbox token and emits an HTTP snippet", () => {
+    it("cue mcp config --http for claude-desktop emits an mcp-remote bridge snippet", () => {
       // Claude Desktop's config only accepts stdio servers, so --http emits
       // an `mcp-remote` bridge rather than a native url+headers snippet.
       const r = cue(["mcp", "config", "claude-desktop", "--http"]);
@@ -106,10 +106,8 @@ describe.skipIf(!unitaskAvailable)(
       expect(args[4]).toMatch(
         /^Authorization: Bearer atk_[0-9A-Z]+\.[0-9a-f]{64}$/,
       );
-      // Header comment reports the sandbox namespace.
-      expect(r.stdout).toMatch(
-        /# Sandbox namespace minted for this client: claude-desktop-[0-9a-z]+/,
-      );
+      // Header advertises wildcard scope (no per-client sandbox).
+      expect(r.stdout).toMatch(/Wildcard-scoped agent token/);
     });
 
     it("cue mcp config cursor --http emits a native url+headers snippet", () => {
@@ -152,21 +150,28 @@ describe.skipIf(!unitaskAvailable)(
       );
     });
 
-    it("each cue mcp config invocation produces a distinct sandbox namespace + token", () => {
+    it("each cue mcp config invocation mints a fresh wildcard-scoped token", () => {
       const a = cue(["mcp", "config", "claude-code"]);
       const b = cue(["mcp", "config", "claude-code"]);
       expect(a.status).toBe(0);
       expect(b.status).toBe(0);
-      const nsA = /minted for this client: (\S+)/.exec(a.stdout)?.[1];
-      const nsB = /minted for this client: (\S+)/.exec(b.stdout)?.[1];
-      expect(nsA).toBeDefined();
-      expect(nsB).toBeDefined();
-      expect(nsA).not.toBe(nsB);
-      // Tokens are baked into the emitted command; they must also differ.
+      // Header should advertise wildcard scope, not a per-client sandbox.
+      expect(a.stdout).toMatch(/Wildcard-scoped agent token/);
+      expect(a.stdout).not.toMatch(/Sandbox namespace minted/);
+      // Tokens are baked into the emitted command; they must differ.
       const tokA = /atk_[0-9A-Z]+\.[0-9a-f]{64}/.exec(a.stdout)?.[0];
       const tokB = /atk_[0-9A-Z]+\.[0-9a-f]{64}/.exec(b.stdout)?.[0];
       expect(tokA).toBeDefined();
+      expect(tokB).toBeDefined();
       expect(tokA).not.toBe(tokB);
+
+      // Verify scope via cue token list.
+      const list = JSON.parse(cue(["token", "list"]).stdout) as Array<{
+        scope: { namespaces: string[] };
+      }>;
+      expect(
+        list.some((t) => t.scope.namespaces.includes("*")),
+      ).toBe(true);
     });
 
     it("cue ns lifecycle: create → inspect → pause → resume → archive → delete", () => {

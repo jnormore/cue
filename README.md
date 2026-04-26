@@ -64,7 +64,7 @@ cue mcp config claude-code       # → JSON snippet + the path it goes in
 cue mcp config claude-desktop    # also: cursor, vscode-copilot
 ```
 
-Every invocation auto-mints a fresh agent token bound to a brand-new per-client sandbox namespace (e.g. `claude-code-01kpz7abcd`). The agent can only touch that namespace — no other namespace is visible to it. The emitted snippet's header comment reports the sandbox name so you can find it via `cue token list`.
+Every invocation mints a fresh **wildcard-scoped** agent token. The locally-connected agent can create and operate as many namespaces as it wants (each namespace = one app). The agent allocates namespaces via the `create_namespace` MCP tool; `cue token list` shows the minted tokens for revocation. **For multi-tenant deployments, don't use this path** — mint scoped tokens explicitly with `cue token create --namespace <pattern>`.
 
 `cue mcp config` requires a running daemon (it mints the token via the daemon's admin API). Run `cue serve` first.
 
@@ -80,7 +80,15 @@ For a stdio client:
 
 `cue mcp --token <agent-token>` is the stdio↔HTTP bridge. It forwards tool calls to the running daemon using the supplied agent token — it does not read the master token. Paste, restart, done.
 
-**Want multiple agents to share a namespace** (e.g., two clients both working in `shop`)? Skip `cue mcp config` and mint manually with `cue token create --namespace shop`, then paste the token into each client's MCP config yourself. `cue mcp config` is the auto-sandbox path; `cue token create` is the explicit-namespace path.
+**Want a scoped (non-wildcard) token** — e.g., a token that can only touch `shop`, or any namespace under an `acme-` prefix? Skip `cue mcp config` and mint explicitly:
+
+```bash
+cue token create --namespace shop                     # literal: only `shop`
+cue token create --namespace shop --namespace billing # literal allowlist
+cue token create --namespace "acme-*"                 # prefix: anything starting with acme-
+```
+
+Paste the resulting bearer into the client's MCP config yourself. The three pattern shapes are documented in [Agent tokens](#agent-tokens).
 
 ### From a remote agent (HTTP)
 
@@ -146,6 +154,7 @@ For operator-style tooling (minting tokens, managing all namespaces, invoking ac
 - `state_append(namespace, key, entry)` → `{ seq, at }` — append to a namespace's shared log (see [State](#state))
 - `state_read(namespace, key, since?, limit?)` → `{ entries, lastSeq }`
 - `state_delete(namespace, key)`
+- `create_namespace(name, displayName?, description?)` — allocate a new namespace. Token must permit the chosen name (wildcard or prefix scope grants this; an explicit allowlist does not).
 - `get_namespace(name)` / `update_namespace(name, patch)` — read or relabel (displayName/description). Status changes are operator-only.
 - `delete_namespace(name)` — cascades actions, triggers, secrets, state
 - `whoami()` → `{ principal, namespaces[{name, status, displayName?}] }` — what this token can touch and the lifecycle status of each namespace
@@ -196,29 +205,44 @@ cue has two principal types:
 
 **The master token is not accepted on `/mcp`.** Every MCP client must carry a scoped agent token — there is no way to configure an agent to run as the operator. The master token gates the `/admin/*` operator surface, which is what the `cue` CLI uses; agent tokens are explicitly rejected there.
 
-An agent token is a scoped bearer bound to an explicit namespace allowlist. When an MCP client authenticates with one, the daemon:
+An agent token's `scope.namespaces` is a list of patterns. Each entry is one of:
 
-- **Filters** `list_actions` / `list_triggers` to the in-scope namespaces.
-- **Returns `NotFound`** for `get_action` / `invoke_action` / `inspect_run` / `list_action_runs` / `get_trigger` / `delete_action` / `delete_trigger` / `update_action` on records whose namespace is out of scope — existence is hidden, not just access.
-- **Returns `Forbidden`** on `create_action` / `create_trigger` / `set_secret` / `state_append` / `state_read` / `state_delete` / `delete_namespace` targeting an out-of-scope namespace.
+| Pattern | Matches | Use |
+|---|---|---|
+| `"*"` | any namespace | local-dev default — `cue mcp config` mints this |
+| `"acme-*"` | anything starting with `acme-` | multi-tenant: one prefix per workspace/project |
+| `"shop"` | exactly `shop` | explicit allowlist (composable: `--namespace shop --namespace weather`) |
+
+When an MCP client authenticates with an agent token, the daemon:
+
+- **Filters** `list_actions` / `list_triggers` to namespaces matching any pattern in scope.
+- **Returns `NotFound`** for `get_action` / `invoke_action` / `inspect_run` / `list_action_runs` / `get_trigger` / `delete_action` / `delete_trigger` / `update_action` on records whose namespace doesn't match — existence is hidden, not just access.
+- **Returns `Forbidden`** on `create_action` / `create_trigger` / `create_namespace` / `set_secret` / `state_append` / `state_read` / `state_delete` / `delete_namespace` targeting an out-of-scope namespace.
 - **Never exposes** agent-token CRUD over MCP — minting and revoking happen via the local `cue token` CLI, which calls the daemon's `/admin/agent-tokens` route with the master token.
 
-Mint one (the daemon must be running):
+Mint one explicitly (the daemon must be running):
 
 ```bash
+# wildcard — equivalent to what cue mcp config produces
+cue token create --namespace "*" --label "trusted-agent"
+
+# prefix — multi-tenant slice
+cue token create --namespace "acme-*" --label "acme-workspace"
+
+# literal allowlist (composable; can mix with patterns)
 cue token create --namespace shop --namespace weather --label "claude-desktop"
-# → { "id": "atk_...", "token": "atk_....<hex>", "scope": { "namespaces": ["shop","weather"] }, ... }
+# → { "id": "atk_...", "token": "atk_....<hex>", "scope": {...}, ... }
 ```
 
 The bearer string is printed **once**; there's no way to recover it later. Re-mint if you lose it.
 
-Or wire an MCP client with an auto-sandbox in one command:
+Or wire an MCP client locally in one command:
 
 ```bash
 cue mcp config claude-desktop
 ```
 
-Every invocation mints a token bound to a fresh per-client sandbox namespace (e.g. `claude-desktop-01kpz7abcd`) and emits an MCP config snippet. For stdio clients, the snippet contains `cue mcp --token atk_...`; for HTTP clients it contains the bearer in the `Authorization` header. The master token never leaves the box. There is no way to emit a config snippet carrying the master token — `cue mcp config` is a sandbox-only path. Use `cue token create --namespace <ns>` above for shared namespaces.
+This mints a wildcard-scoped token and emits an MCP config snippet. The connected agent can create and operate any namespace. For stdio clients the snippet contains `cue mcp --token atk_...`; for HTTP clients (`--http`) it contains the bearer in the `Authorization` header. The master token never leaves the box.
 
 Inspect and revoke:
 

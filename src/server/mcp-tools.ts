@@ -7,7 +7,6 @@ import {
   type ActionRecord,
   type ActionSummary,
   type CronConfig,
-  DEFAULT_NAMESPACE,
   type NamespaceRecord,
   type NamespaceStatus,
   StoreError,
@@ -20,7 +19,11 @@ import {
   validateNamespace,
   validateSecretName,
 } from "../store/index.js";
-import { type Principal, requireNamespace } from "./auth.js";
+import {
+  namespaceAllowed,
+  type Principal,
+  requireNamespace,
+} from "./auth.js";
 import {
   assertNamespaceActive,
   assertNamespaceMutable,
@@ -40,10 +43,10 @@ export interface McpToolDeps extends InvokeDeps {
   principal: Principal;
 }
 
-function namespaceInScope(principal: Principal, namespace: string): boolean {
-  if (principal.type === "master") return true;
-  return principal.scope.namespaces.includes(namespace);
-}
+// `namespaceAllowed` from auth.ts is the canonical check; we used to
+// duplicate it here. Kept the alias-by-import to avoid a sweeping
+// rename across the dozens of call sites in this file.
+const namespaceInScope = namespaceAllowed;
 
 export interface ActionRef {
   id: string;
@@ -73,13 +76,24 @@ export async function createAction(
     policy?: Policy;
   },
 ): Promise<ActionRef> {
-  const namespace = args.namespace ?? DEFAULT_NAMESPACE;
-  requireNamespace(deps.principal, namespace, "create action in");
-  await assertNamespaceMutable(deps.store, namespace);
+  // Agents must always pick a namespace. There's no "default" — apps
+  // are namespaces, and silently dropping work into a namespace the
+  // caller didn't name is exactly the bug we're avoiding. If the
+  // caller doesn't know what's available, `whoami` lists in-scope
+  // namespaces; `create_namespace` allocates a new one.
+  if (!args.namespace) {
+    throw new StoreError(
+      "ValidationError",
+      "namespace is required. Call whoami to see available namespaces, or create_namespace to allocate a new one.",
+      { hint: "namespace" },
+    );
+  }
+  requireNamespace(deps.principal, args.namespace, "create action in");
+  await assertNamespaceMutable(deps.store, args.namespace);
   const action = await deps.store.actions.create({
     name: args.name,
     code: args.code,
-    namespace,
+    namespace: args.namespace,
     ...(args.policy ? { policy: args.policy } : {}),
   });
   return toActionRef(deps, action);
@@ -166,8 +180,7 @@ export async function listActions(
     args.namespace ? { namespace: args.namespace } : undefined,
   );
   if (deps.principal.type === "master") return all;
-  const allowed = new Set(deps.principal.scope.namespaces);
-  return all.filter((a) => allowed.has(a.namespace));
+  return all.filter((a) => namespaceAllowed(deps.principal, a.namespace));
 }
 
 export async function listActionRuns(
@@ -312,8 +325,7 @@ export async function listTriggers(
   if (args.actionId) filter.actionId = args.actionId;
   const all = await deps.store.triggers.list(filter);
   if (deps.principal.type === "master") return all;
-  const allowed = new Set(deps.principal.scope.namespaces);
-  return all.filter((t) => allowed.has(t.namespace));
+  return all.filter((t) => namespaceAllowed(deps.principal, t.namespace));
 }
 
 export async function deleteNamespaceTool(
@@ -374,18 +386,65 @@ export async function whoami(deps: McpToolDeps): Promise<WhoamiResult> {
     const all = await deps.store.namespaces.list();
     return { principal: "master", namespaces: all.map(toWhoamiNamespace) };
   }
+  const patterns = deps.principal.scope.namespaces;
+  const hasPattern = patterns.some(
+    (p) => p === "*" || p.endsWith("*"),
+  );
+  // For wildcard or prefix scope, list-and-filter the existing
+  // namespaces. There's no useful "synthesized stub" answer when the
+  // scope is open-ended — we'd be inventing names.
+  if (hasPattern) {
+    const all = await deps.store.namespaces.list();
+    const matching = all.filter((ns) =>
+      namespaceAllowed(deps.principal, ns.name),
+    );
+    return {
+      principal: "agent",
+      namespaces: matching.map(toWhoamiNamespace),
+    };
+  }
+  // Pure exact-match scope: enumerate the explicit allowlist; missing
+  // rows get a synthesized "active" stub so the agent always sees a
+  // complete entry.
   const out: WhoamiNamespace[] = [];
-  for (const name of deps.principal.scope.namespaces) {
+  for (const name of patterns) {
     const existing = await deps.store.namespaces.get(name);
     if (existing) {
       out.push(toWhoamiNamespace(existing));
     } else {
-      // No metadata row yet — synthesize an active stub. Mirrors how
-      // assertNamespaceActive treats missing rows.
       out.push({ name, status: "active" });
     }
   }
   return { principal: "agent", namespaces: out };
+}
+
+export async function createNamespace(
+  deps: McpToolDeps,
+  args: { name: string; displayName?: string; description?: string },
+): Promise<NamespaceRecord> {
+  validateNamespace(args.name);
+  // Token must permit this namespace. With wildcard scope (the local
+  // dev default), any name is allowed. With a prefix scope like
+  // "acme-*", only names under that prefix succeed.
+  requireNamespace(deps.principal, args.name, "create namespace");
+  const existing = await deps.store.namespaces.get(args.name);
+  if (existing) {
+    throw new StoreError(
+      "NameCollision",
+      `Namespace "${args.name}" already exists`,
+      { name: args.name },
+    );
+  }
+  const now = new Date().toISOString();
+  const record: NamespaceRecord = {
+    name: args.name,
+    status: "active",
+    createdAt: now,
+    updatedAt: now,
+  };
+  if (args.displayName !== undefined) record.displayName = args.displayName;
+  if (args.description !== undefined) record.description = args.description;
+  return deps.store.namespaces.upsert(record);
 }
 
 export async function getNamespace(

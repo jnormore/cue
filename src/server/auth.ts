@@ -1,5 +1,9 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
-import type { AgentScope, StoreAdapter } from "../store/index.js";
+import {
+  type AgentScope,
+  scopePatternMatches,
+  type StoreAdapter,
+} from "../store/index.js";
 
 const BEARER_PREFIX = "Bearer ";
 
@@ -129,15 +133,17 @@ export function isMaster(principal: Principal): boolean {
 
 /**
  * Returns true if `principal` is allowed to touch `namespace`. Master
- * is always allowed; agent tokens must have the namespace in their
- * allowlist.
+ * is always allowed; agent tokens match the namespace against their
+ * scope patterns (literal, `prefix-*`, or `*`).
  */
 export function namespaceAllowed(
   principal: Principal,
   namespace: string,
 ): boolean {
   if (principal.type === "master") return true;
-  return principal.scope.namespaces.includes(namespace);
+  return principal.scope.namespaces.some((p) =>
+    scopePatternMatches(p, namespace),
+  );
 }
 
 /**

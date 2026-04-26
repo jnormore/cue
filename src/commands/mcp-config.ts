@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Command } from "commander";
-import { ulid } from "ulidx";
 import { DEFAULT_PORT, cuePaths } from "../config.js";
 import { daemonEndpoint, postJson } from "./admin-client.js";
 
@@ -93,36 +92,35 @@ interface ConfigFlags {
   label?: string;
 }
 
-/**
- * Generate a fresh per-client sandbox namespace. The operator never
- * has to name or reason about it — the agent can only touch its own
- * sandbox. Example: "claude-code" → "claude-code-01kpz7abcd".
- */
-function autoNamespace(client: string): string {
-  return `${client}-${ulid().slice(0, 10).toLowerCase()}`;
-}
-
-interface MintedScopedToken {
+interface MintedToken {
   token: string;
-  namespace: string;
 }
 
-async function mintSandboxToken(
+/**
+ * Mint a wildcard-scoped token for a client. In OSS local-dev, the
+ * agent connected to your daemon is trusted to author and operate
+ * many apps (each = a namespace). Per-client sandboxing is no longer
+ * the default — agents create namespaces freely via `create_namespace`.
+ *
+ * For multi-tenant deployments (e.g., Cloud), don't use this command;
+ * mint a scoped token explicitly with `cue token create --namespace
+ * <pattern>` (where `<pattern>` is a literal name or `prefix-*`).
+ */
+async function mintLocalToken(
   client: string,
   label: string | undefined,
-): Promise<MintedScopedToken> {
-  const namespace = autoNamespace(client);
+): Promise<MintedToken> {
   const { baseUrl, token: bearer } = daemonEndpoint();
-  const resolvedLabel = label ?? `${client} (auto-scoped)`;
+  const resolvedLabel = label ?? `${client} (local)`;
   const minted = await postJson<{ token: string }>(
     `${baseUrl}/admin/agent-tokens`,
     bearer,
     {
-      scope: { namespaces: [namespace] },
+      scope: { namespaces: ["*"] },
       label: resolvedLabel,
     },
   );
-  return { token: minted.token, namespace };
+  return { token: minted.token };
 }
 
 function buildStdioSnippet(token: string): object {
@@ -167,7 +165,7 @@ export function registerMcpConfigCommand(mcpCommand: Command): void {
     .command("config <client>")
     .description(
       "Print an MCP server config snippet for a client. Known clients: claude-code, claude-desktop, cursor, vscode-copilot.\n\n" +
-        "Every invocation mints a fresh agent token scoped to a **new per-client sandbox namespace**. The agent can only touch its own sandbox — it cannot see other namespaces in ~/.cue/. For shared namespaces or explicit names, use `cue token create --namespace <ns>` directly.",
+        "Every invocation mints a fresh wildcard-scoped agent token (`*`). The agent can create and manage as many namespaces as it wants — apps are namespaces, and a single client can author many. For multi-tenant deployments, use `cue token create --namespace <pattern>` with explicit literals or prefix patterns (e.g. `acme-*`).",
     )
     .option(
       "--http",
@@ -205,9 +203,9 @@ export function registerMcpConfigCommand(mcpCommand: Command): void {
         process.exit(1);
       }
 
-      const { token, namespace } = await mintSandboxToken(client, flags.label);
+      const { token } = await mintLocalToken(client, flags.label);
 
-      writeHeader(target, namespace, useHttp);
+      writeHeader(target, useHttp);
 
       if (target.kind === "shell-command") {
         // Copy-paste-ready: no JSON, just the command the operator runs.
@@ -223,11 +221,7 @@ export function registerMcpConfigCommand(mcpCommand: Command): void {
     });
 }
 
-function writeHeader(
-  target: ClientTarget,
-  namespace: string,
-  useHttp: boolean,
-): void {
+function writeHeader(target: ClientTarget, useHttp: boolean): void {
   if (target.kind === "json-config") {
     process.stdout.write(`# config path: ${target.path}\n`);
   } else {
@@ -246,10 +240,10 @@ function writeHeader(
     }
   }
   process.stdout.write(
-    `# Sandbox namespace minted for this client: ${namespace}\n`,
+    "# Wildcard-scoped agent token: the connected agent can create and manage any namespace.\n",
   );
   process.stdout.write(
-    "# The agent can only touch this namespace. List / revoke via `cue token list` and `cue token delete`.\n",
+    "# List / revoke via `cue token list` and `cue token delete`.\n",
   );
   process.stdout.write(
     "# This token cannot be recovered later — save this output.\n",

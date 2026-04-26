@@ -12,7 +12,7 @@ import {
   mintAgentTokenBearer,
   newAgentTokenId,
   parseAgentTokenId,
-  validateNamespace,
+  validateScopePattern,
 } from "../../index.js";
 
 interface AgentTokenRow {
@@ -33,10 +33,12 @@ function assertScope(scope: AgentScope): void {
   if (scope.namespaces.length === 0) {
     throw new StoreError(
       "ValidationError",
-      "scope.namespaces must contain at least one namespace",
+      "scope.namespaces must contain at least one entry",
     );
   }
-  for (const ns of scope.namespaces) validateNamespace(ns);
+  // Each entry can be a literal namespace, a prefix pattern (`foo-*`),
+  // or the wildcard `*`. See scopePatternMatches.
+  for (const pattern of scope.namespaces) validateScopePattern(pattern);
 }
 
 function toSummary(r: AgentTokenRow): AgentTokenSummary {

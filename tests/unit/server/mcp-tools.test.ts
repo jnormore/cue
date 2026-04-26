@@ -126,8 +126,56 @@ describe("mcp-tools", () => {
       expect(ref.invokeUrl).toBe(`http://localhost:4747/a/${ref.id}`);
     });
 
+    it("create_action with no namespace throws ValidationError (no defaults — agents must pick)", async () => {
+      await expect(
+        createAction(deps, { name: "h", code: "1" }),
+      ).rejects.toMatchObject({ kind: "ValidationError" });
+    });
+
+    it("create_action with a wildcard-scoped agent permits any namespace", async () => {
+      const agentDeps = {
+        ...deps,
+        principal: {
+          type: "agent" as const,
+          id: "atk_test",
+          scope: { namespaces: ["*"] },
+        },
+      };
+      const ref = await createAction(agentDeps, {
+        name: "h",
+        code: "1",
+        namespace: "anything",
+      });
+      expect(ref.namespace).toBe("anything");
+    });
+
+    it("create_action with a prefix-scoped agent permits matching names; rejects others", async () => {
+      const agentDeps = {
+        ...deps,
+        principal: {
+          type: "agent" as const,
+          id: "atk_test",
+          scope: { namespaces: ["acme-*"] },
+        },
+      };
+      const ok = await createAction(agentDeps, {
+        name: "h",
+        code: "1",
+        namespace: "acme-shop",
+      });
+      expect(ok.namespace).toBe("acme-shop");
+      // out-of-prefix namespace gets ScopeError
+      await expect(
+        createAction(agentDeps, {
+          name: "x",
+          code: "1",
+          namespace: "bob-foo",
+        }),
+      ).rejects.toMatchObject({ name: "ScopeError" });
+    });
+
     it("update_action patches code and returns updated ref", async () => {
-      const ref = await createAction(deps, { name: "a", code: "x" });
+      const ref = await createAction(deps, { name: "a", code: "x", namespace: "default" });
       const patched = await updateAction(deps, {
         id: ref.id,
         patch: { code: "y" },
@@ -138,7 +186,7 @@ describe("mcp-tools", () => {
     });
 
     it("invoke_action runs the action and records a run", async () => {
-      const ref = await createAction(deps, { name: "a", code: "x" });
+      const ref = await createAction(deps, { name: "a", code: "x", namespace: "default" });
       runMock.mockResolvedValueOnce({
         stdout: '{"k":42}',
         stderr: "",
@@ -172,7 +220,7 @@ describe("mcp-tools", () => {
     });
 
     it("delete_action cascades trigger removal and cancels cron handles", async () => {
-      const ref = await createAction(deps, { name: "a", code: "x" });
+      const ref = await createAction(deps, { name: "a", code: "x", namespace: "default" });
       const cron = await createTrigger(deps, {
         type: "cron",
         actionId: ref.id,
@@ -191,7 +239,7 @@ describe("mcp-tools", () => {
     });
 
     it("inspect_run returns stdout, stderr, input alongside meta", async () => {
-      const ref = await createAction(deps, { name: "a", code: "x" });
+      const ref = await createAction(deps, { name: "a", code: "x", namespace: "default" });
       runMock.mockResolvedValueOnce({
         stdout: "hello",
         stderr: "warn",
@@ -224,7 +272,7 @@ describe("mcp-tools", () => {
     });
 
     it("create_trigger webhook returns webhookUrl and webhookToken", async () => {
-      const action = await createAction(deps, { name: "a", code: "x" });
+      const action = await createAction(deps, { name: "a", code: "x", namespace: "default" });
       const trg = await createTrigger(deps, {
         type: "webhook",
         actionId: action.id,
@@ -235,7 +283,7 @@ describe("mcp-tools", () => {
     });
 
     it("delete_trigger cancels the cron handle", async () => {
-      const action = await createAction(deps, { name: "a", code: "x" });
+      const action = await createAction(deps, { name: "a", code: "x", namespace: "default" });
       const trg = await createTrigger(deps, {
         type: "cron",
         actionId: action.id,
@@ -246,8 +294,8 @@ describe("mcp-tools", () => {
     });
 
     it("list_triggers filters by namespace and actionId", async () => {
-      const a = await createAction(deps, { name: "a", code: "x" });
-      const b = await createAction(deps, { name: "b", code: "y" });
+      const a = await createAction(deps, { name: "a", code: "x", namespace: "default" });
+      const b = await createAction(deps, { name: "b", code: "y", namespace: "default" });
       await createTrigger(deps, {
         type: "cron",
         actionId: a.id,

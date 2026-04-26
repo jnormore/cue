@@ -111,6 +111,7 @@ describe("daemon smoke", () => {
     expect(names).toEqual(
       [
         "create_action",
+        "create_namespace",
         "create_trigger",
         "delete_action",
         "delete_namespace",

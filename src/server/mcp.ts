@@ -5,6 +5,7 @@ import { StoreError } from "../store/index.js";
 import { ScopeError } from "./auth.js";
 import {
   createAction,
+  createNamespace,
   createTrigger,
   deleteActionTool,
   deleteNamespaceTool,
@@ -261,6 +262,20 @@ export function buildMcpServer(deps: McpToolDeps): McpServer {
       },
     },
     (args) => wrap(() => listTriggers(deps, args)),
+  );
+
+  server.registerTool(
+    "create_namespace",
+    {
+      description:
+        "Allocate a new namespace (an isolated mini-app). The token must permit the chosen name (wildcard or prefix scope grants this; an explicit allowlist does not). Use this when an agent is starting work on a new app and wants its own clean slate of actions/triggers/secrets/state.",
+      inputSchema: {
+        name: z.string(),
+        displayName: z.string().optional(),
+        description: z.string().optional(),
+      },
+    },
+    (args) => wrap(() => createNamespace(deps, args)),
   );
 
   server.registerTool(

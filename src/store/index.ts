@@ -341,6 +341,57 @@ export function validateNamespace(ns: string): void {
   }
 }
 
+/**
+ * Match a scope pattern against a concrete namespace name. Patterns:
+ *
+ *   "*"        — wildcard, match-all (the local-dev default)
+ *   "prefix-*" — prefix match (anything starting with "prefix-")
+ *   "literal"  — exact match (the explicit-allowlist case)
+ *
+ * The set of pattern shapes is deliberately closed: no middle-of-string
+ * globs, no regex. This keeps the matcher trivial and lets a future
+ * Postgres adapter translate prefix patterns into `name LIKE 'prefix%'`
+ * queries without an interpreter.
+ */
+export function scopePatternMatches(
+  pattern: string,
+  namespace: string,
+): boolean {
+  if (pattern === "*") return true;
+  if (pattern.endsWith("*")) {
+    return namespace.startsWith(pattern.slice(0, -1));
+  }
+  return pattern === namespace;
+}
+
+/**
+ * Validate a scope pattern. Accepts the three shapes documented on
+ * {@link scopePatternMatches}. Throws ValidationError for anything
+ * else (middle-of-string globs, empty strings, etc.).
+ */
+export function validateScopePattern(pattern: string): void {
+  if (pattern === "*") return;
+  if (pattern.endsWith("*")) {
+    const prefix = pattern.slice(0, -1);
+    if (!prefix) {
+      throw new StoreError(
+        "ValidationError",
+        "scope pattern must be '*', a prefix like 'foo-*', or a literal namespace name",
+        { pattern },
+      );
+    }
+    if (prefix.length > NAMESPACE_MAX || !NAME_RE.test(prefix)) {
+      throw new StoreError(
+        "ValidationError",
+        `scope prefix "${prefix}" must match ${NAME_RE} and be ≤${NAMESPACE_MAX} chars`,
+        { pattern },
+      );
+    }
+    return;
+  }
+  validateNamespace(pattern);
+}
+
 export function validateSecretName(name: string): void {
   if (!name || name.length > SECRET_NAME_MAX || !SECRET_NAME_RE.test(name)) {
     throw new StoreError(

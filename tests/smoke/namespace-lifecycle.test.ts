@@ -293,6 +293,59 @@ describe("namespace lifecycle smoke", () => {
     });
   });
 
+  it("whoami for a prefix-scoped agent returns only matching namespaces", async () => {
+    // Set up: create three namespaces — two under acme-, one under bob-.
+    for (const name of ["acme-shop", "acme-billing", "bob-foo"]) {
+      await adminPost("/admin/namespaces", { name });
+    }
+    // Mint a prefix-scoped token.
+    const minted = await fetch(`${baseUrl}/admin/agent-tokens`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${MASTER}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        scope: { namespaces: ["acme-*"] },
+        label: "acme",
+      }),
+    }).then((r) => r.json() as Promise<{ token: string }>);
+
+    const acmeAgent = new Client(
+      { name: "acme", version: "0.0.0" },
+      { capabilities: {} },
+    );
+    await acmeAgent.connect(
+      new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+        requestInit: {
+          headers: { Authorization: `Bearer ${minted.token}` },
+        },
+      }),
+    );
+
+    const result = (await acmeAgent.callTool({
+      name: "whoami",
+      arguments: {},
+    })) as { content: { type: string; text: string }[] };
+    const body = JSON.parse(result.content[0]!.text) as {
+      principal: string;
+      namespaces: { name: string }[];
+    };
+    expect(body.principal).toBe("agent");
+    const names = body.namespaces.map((n) => n.name).sort();
+    expect(names).toEqual(["acme-billing", "acme-shop"]);
+    expect(names).not.toContain("bob-foo");
+
+    await acmeAgent.close();
+    // Cleanup
+    for (const name of ["acme-shop", "acme-billing", "bob-foo"]) {
+      await fetch(`${baseUrl}/admin/namespaces/${name}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${MASTER}` },
+      });
+    }
+  });
+
   it("whoami synthesizes active stubs for in-scope namespaces with no metadata row", async () => {
     // No `lc` metadata row exists at this point.
     const result = (await agent.callTool({
@@ -305,6 +358,80 @@ describe("namespace lifecycle smoke", () => {
     };
     expect(body.principal).toBe("agent");
     expect(body.namespaces).toEqual([{ name: "lc", status: "active" }]);
+  });
+
+  it("MCP create_namespace lets a wildcard agent allocate fresh namespaces", async () => {
+    // The shared agent in this file has scope ["lc"] (single literal).
+    // For this test, mint a wildcard token via the admin API and connect
+    // a separate Client.
+    const minted = await fetch(`${baseUrl}/admin/agent-tokens`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${MASTER}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        scope: { namespaces: ["*"] },
+        label: "wildcard-agent",
+      }),
+    }).then((r) => r.json() as Promise<{ token: string }>);
+
+    const wildcardAgent = new Client(
+      { name: "wildcard", version: "0.0.0" },
+      { capabilities: {} },
+    );
+    await wildcardAgent.connect(
+      new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+        requestInit: {
+          headers: { Authorization: `Bearer ${minted.token}` },
+        },
+      }),
+    );
+
+    const result = (await wildcardAgent.callTool({
+      name: "create_namespace",
+      arguments: {
+        name: "fresh-app",
+        displayName: "Fresh App",
+        description: "spun up by the agent",
+      },
+    })) as { content: { type: string; text: string }[] };
+    const body = JSON.parse(result.content[0]!.text) as {
+      name: string;
+      status: string;
+      displayName: string;
+    };
+    expect(body.name).toBe("fresh-app");
+    expect(body.status).toBe("active");
+    expect(body.displayName).toBe("Fresh App");
+
+    // Now create_action against the new namespace works.
+    const action = (await wildcardAgent.callTool({
+      name: "create_action",
+      arguments: {
+        name: "hi",
+        code: "1",
+        namespace: "fresh-app",
+      },
+    })) as { content: { type: string; text: string }[] };
+    expect(JSON.parse(action.content[0]!.text)).toMatchObject({
+      namespace: "fresh-app",
+    });
+
+    // Collision on second create_namespace with the same name.
+    const collision = (await wildcardAgent.callTool({
+      name: "create_namespace",
+      arguments: { name: "fresh-app" },
+    })) as { isError: boolean; content: { type: string; text: string }[] };
+    expect(collision.isError).toBe(true);
+    expect(collision.content[0]!.text).toMatch(/already exists/i);
+
+    await wildcardAgent.close();
+    // Cleanup — cascade-delete the namespace we created.
+    await fetch(`${baseUrl}/admin/namespaces/fresh-app`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${MASTER}` },
+    });
   });
 
   it("MCP update_namespace can set displayName but not status", async () => {
