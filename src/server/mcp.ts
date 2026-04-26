@@ -109,7 +109,20 @@ export function buildMcpServer(deps: McpToolDeps): McpServer {
     {
       description:
         "Create a named action. Code runs under the action's policy inside the runtime adapter.\n\n" +
-        "Declared primitives (all optional; each is off unless the action opts in):\n" +
+        "Input envelope (mounted as a file at /cue-envelope.json):\n" +
+        "  { trigger, input, request? }\n" +
+        "  • input    — payload from the caller. ALWAYS read from here, regardless of whether the\n" +
+        "               action was fired by invoke_action, a webhook, or cron. For invoke_action\n" +
+        "               and cron, this is the data the caller passed; for webhooks, this is the\n" +
+        "               request body. (env.request is also populated for webhooks for HTTP-specific\n" +
+        "               context — method, headers, query — but the payload itself is at env.input.)\n" +
+        "  • trigger  — { type: 'cron' | 'webhook', triggerId, firedAt } when fired by a trigger,\n" +
+        "               null when called via invoke_action.\n" +
+        "  • request  — { method, path, query, headers, body } for webhook triggers only.\n\n" +
+        "Output: write JSON to stdout. If stdout parses as JSON, the caller receives `output` as a\n" +
+        "parsed value; otherwise as a raw string. Don't `console.log` non-JSON before your final\n" +
+        "JSON output, or `output` will be null.\n\n" +
+        "Declared primitives in `policy` (all optional; each is off unless the action opts in):\n" +
         "  allowNet: string[]    — hostnames (not URLs) the action can reach over HTTP(S).\n" +
         "  allowTcp: string[]    — 'host:port' entries for raw TCP. Includes loopback (e.g. 127.0.0.1:5432).\n" +
         "  secrets:  string[]    — names of secrets (set via set_secret) forwarded as env vars. Namespace-scoped.\n" +
@@ -120,12 +133,16 @@ export function buildMcpServer(deps: McpToolDeps): McpServer {
         "                            State is a durable append-only log per (namespace, key). Scoped to the\n" +
         "                            action's namespace; the daemon enforces this via a scoped token.\n" +
         "                            Reads return { entries: [{seq, at, entry}], lastSeq }. Use the lastSeq\n" +
-        "                            as the next `since` cursor.\n" +
+        "                            as the next `since` cursor (entries are filtered by seq > since).\n" +
         "  timeoutSeconds, memoryMb — runtime caps.\n\n" +
-        "Example code using state (a webhook that logs every hit):\n" +
+        "Skeleton (input + state, works for both invoke_action and webhook firing):\n" +
+        "  const fs = require('fs');\n" +
         "  const state = require('/cue-state');\n" +
-        "  const env = JSON.parse(require('fs').readFileSync('/cue-envelope.json','utf8'));\n" +
-        "  await state.append('hits', { body: env.request?.body, at: new Date().toISOString() });\n",
+        "  const env = JSON.parse(fs.readFileSync('/cue-envelope.json', 'utf8'));\n" +
+        "  const input = env.input ?? {};\n" +
+        "  // ... do work ...\n" +
+        "  await state.append('events', { input, at: new Date().toISOString() });\n" +
+        "  console.log(JSON.stringify({ ok: true }));\n",
       inputSchema: {
         name: z.string(),
         code: z.string(),

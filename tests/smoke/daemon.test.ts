@@ -206,6 +206,58 @@ describe("daemon smoke", () => {
     expect(body.exitCode).toBe(0);
   });
 
+  it("webhook envelope mirrors body to env.input (canonical payload location)", async () => {
+    // We can't observe env.input from inside the action (smoke uses a
+    // mock runtime), but we can inspect the envelope that's about to
+    // be handed to the runtime. The webhook handler must populate
+    // env.input from req.body so action code works the same whether
+    // fired by invoke_action or via webhook POST.
+    const create = (await agent.callTool({
+      name: "create_action",
+      arguments: {
+        name: "smoke-input-mirror",
+        code: "console.log('noop')",
+        namespace: "smoke",
+      },
+    })) as CallToolResult;
+    const action = parseToolText(create) as { id: string };
+
+    const trigCreate = (await agent.callTool({
+      name: "create_trigger",
+      arguments: { type: "webhook", actionId: action.id },
+    })) as CallToolResult;
+    const trg = parseToolText(trigCreate) as {
+      webhookUrl: string;
+      webhookToken: string;
+    };
+
+    const payload = { ticker: "AAPL", op: "add" };
+    runMock.mockClear();
+    const res = await fetch(trg.webhookUrl, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${trg.webhookToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    expect(res.status).toBe(200);
+
+    // The runtime was called with stdin = JSON.stringify(envelope).
+    // Parse it and assert the contract.
+    const runArgs = runMock.mock.calls[0]?.[0] as { stdin: string };
+    expect(runArgs).toBeDefined();
+    const envelope = JSON.parse(runArgs.stdin) as {
+      trigger: { type: string };
+      input: unknown;
+      request: { body: unknown };
+    };
+    expect(envelope.trigger.type).toBe("webhook");
+    expect(envelope.input).toEqual(payload);
+    // request.body still populated for actions that need HTTP context.
+    expect(envelope.request.body).toEqual(payload);
+  });
+
   it("master token cannot be used against /w/:id (webhook requires scoped token)", async () => {
     const createdAction = await store.actions.create({
       name: "hook-scope",

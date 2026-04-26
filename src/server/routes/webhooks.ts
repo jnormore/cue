@@ -34,18 +34,26 @@ export function webhookRoutes(deps: InvokeDeps): FastifyPluginAsync {
         // Throws StoreError(NamespacePaused | NamespaceArchived);
         // Fastify's setErrorHandler maps both to 423.
         await assertNamespaceActive(deps.store, action.namespace);
+        // Mirror the body at envelope.input so action code can read
+        // its payload from one canonical place regardless of whether
+        // the action was fired by invoke_action, a cron, or a webhook.
+        // env.request stays for actions that need HTTP-specific context
+        // (headers, method, query) — but the typical "give me the
+        // payload" case is now just `env.input`.
+        const body = req.body ?? null;
         const envelope: InvokeEnvelope = {
           trigger: {
             type: "webhook",
             triggerId: trigger.id,
             firedAt: new Date().toISOString(),
           },
+          input: body,
           request: {
             method: req.method,
             path: req.url,
             query: (req.query ?? {}) as Record<string, unknown>,
             headers: req.headers,
-            body: req.body ?? null,
+            body,
           },
         };
         return invokeAction(deps, action, envelope);
