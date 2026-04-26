@@ -4,6 +4,7 @@ import {
   type AgentScope,
   type AgentTokenCreateInput,
   type AgentTokenId,
+  type AgentTokenPatch,
   type AgentTokenRecord,
   type AgentTokenStore,
   type AgentTokenSummary,
@@ -90,6 +91,40 @@ export function sqliteAgentTokens(db: DatabaseSync): AgentTokenStore {
         .prepare("SELECT * FROM agent_tokens WHERE id = ?")
         .get(id) as AgentTokenRow | undefined;
       return row ? toSummary(row) : null;
+    },
+
+    async update(
+      id: AgentTokenId,
+      patch: AgentTokenPatch,
+    ): Promise<AgentTokenSummary> {
+      const existing = db
+        .prepare("SELECT * FROM agent_tokens WHERE id = ?")
+        .get(id) as AgentTokenRow | undefined;
+      if (!existing) {
+        throw new StoreError("NotFound", `Agent token "${id}" not found`, {
+          id,
+        });
+      }
+      let nextScopeJson = existing.scope;
+      if (patch.scope !== undefined) {
+        assertScope(patch.scope);
+        const normalized: AgentScope = {
+          namespaces: [...new Set(patch.scope.namespaces)].sort(),
+        };
+        nextScopeJson = JSON.stringify(normalized);
+      }
+      const nextLabel =
+        patch.label === undefined ? existing.label : patch.label;
+      db.prepare(
+        "UPDATE agent_tokens SET scope = ?, label = ? WHERE id = ?",
+      ).run(nextScopeJson, nextLabel, id);
+      return toSummary({
+        id: existing.id,
+        token: existing.token,
+        scope: nextScopeJson,
+        label: nextLabel,
+        created_at: existing.created_at,
+      });
     },
 
     async verify(token: string): Promise<AgentTokenSummary | null> {

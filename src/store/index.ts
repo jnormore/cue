@@ -257,6 +257,13 @@ export interface AgentTokenCreateInput {
   label?: string;
 }
 
+export interface AgentTokenPatch {
+  /** Replace the full scope. De-duped and sorted by the store. */
+  scope?: AgentScope;
+  /** Set to null to clear. */
+  label?: string | null;
+}
+
 /**
  * Scoped per-agent tokens. The master token at `~/.cue/token` stays
  * untouched; agent tokens are purely additive. Tokens have the shape
@@ -264,12 +271,21 @@ export interface AgentTokenCreateInput {
  * the scope without scanning the store.
  *
  * Agent tokens cannot mint other agent tokens. Only the master
- * principal may call `mint` / `delete`.
+ * principal may call `mint` / `update` / `delete`.
  */
 export interface AgentTokenStore {
   mint(input: AgentTokenCreateInput): Promise<AgentTokenRecord>;
   list(): Promise<AgentTokenSummary[]>;
   get(id: AgentTokenId): Promise<AgentTokenSummary | null>;
+  /**
+   * Update an existing token's scope and/or label. Replace-style:
+   * `scope` overwrites the full namespace list (de-duped, sorted).
+   * `label` set to null clears it. Throws `StoreError("NotFound")` if
+   * the id is unknown. The bearer string is unchanged — callers using
+   * the existing token continue to work, with the new scope applied
+   * on the next request.
+   */
+  update(id: AgentTokenId, patch: AgentTokenPatch): Promise<AgentTokenSummary>;
   /**
    * Constant-time verify. Returns the summary (without the raw token
    * value) on match, null otherwise. Null covers: unknown id, token

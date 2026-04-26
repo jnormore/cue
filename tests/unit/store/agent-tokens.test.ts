@@ -103,6 +103,74 @@ describe("sqlite agent-tokens store", () => {
     });
   });
 
+  describe("update", () => {
+    it("replaces scope; de-dupes and sorts the new namespace list", async () => {
+      const r = await tokens.mint({ scope: { namespaces: ["shop"] } });
+      const updated = await tokens.update(r.id, {
+        scope: { namespaces: ["weather", "shop", "shop", "billing"] },
+      });
+      expect(updated.scope).toEqual({
+        namespaces: ["billing", "shop", "weather"],
+      });
+      expect(updated.id).toBe(r.id);
+    });
+
+    it("does not change the bearer string; verify() returns the new scope", async () => {
+      const r = await tokens.mint({ scope: { namespaces: ["shop"] } });
+      await tokens.update(r.id, {
+        scope: { namespaces: ["shop", "billing"] },
+      });
+      const verified = await tokens.verify(r.token);
+      expect(verified).not.toBeNull();
+      expect(verified?.id).toBe(r.id);
+      expect(verified?.scope.namespaces).toEqual(["billing", "shop"]);
+    });
+
+    it("sets a label when provided; clears it when null; preserves it when omitted", async () => {
+      const r = await tokens.mint({ scope: { namespaces: ["shop"] } });
+      const a = await tokens.update(r.id, { label: "claude-desktop" });
+      expect(a.label).toBe("claude-desktop");
+
+      const b = await tokens.update(r.id, {
+        scope: { namespaces: ["shop", "billing"] },
+      });
+      expect(b.label).toBe("claude-desktop");
+
+      const c = await tokens.update(r.id, { label: null });
+      expect(c.label).toBeUndefined();
+    });
+
+    it("with an empty patch is a no-op that returns the current record", async () => {
+      const r = await tokens.mint({
+        scope: { namespaces: ["shop"] },
+        label: "x",
+      });
+      const updated = await tokens.update(r.id, {});
+      expect(updated.scope).toEqual({ namespaces: ["shop"] });
+      expect(updated.label).toBe("x");
+    });
+
+    it("throws NotFound for an unknown id", async () => {
+      await expect(
+        tokens.update("atk_unknown", { scope: { namespaces: ["shop"] } }),
+      ).rejects.toBeInstanceOf(StoreError);
+    });
+
+    it("rejects an empty scope", async () => {
+      const r = await tokens.mint({ scope: { namespaces: ["shop"] } });
+      await expect(
+        tokens.update(r.id, { scope: { namespaces: [] } }),
+      ).rejects.toBeInstanceOf(StoreError);
+    });
+
+    it("rejects an invalid namespace name", async () => {
+      const r = await tokens.mint({ scope: { namespaces: ["shop"] } });
+      await expect(
+        tokens.update(r.id, { scope: { namespaces: ["Bad Name"] } }),
+      ).rejects.toBeInstanceOf(StoreError);
+    });
+  });
+
   describe("list / get / delete", () => {
     it("list returns summaries in createdAt order without the raw token", async () => {
       const a = await tokens.mint({

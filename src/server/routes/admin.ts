@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import {
   type ActionPatch,
+  type AgentTokenPatch,
   deleteAction as cascadeDeleteAction,
   deleteNamespace as cascadeDeleteNamespace,
   DEFAULT_NAMESPACE,
@@ -242,6 +243,16 @@ function registerAgentTokenRoutes(
 
   app.get("/admin/agent-tokens", async () => {
     return opts.store.agentTokens.list();
+  });
+
+  app.patch<{
+    Params: { id: string };
+    Body: { scope?: { namespaces: string[] }; label?: string | null };
+  }>("/admin/agent-tokens/:id", async (req) => {
+    const patch: AgentTokenPatch = {};
+    if (req.body.scope !== undefined) patch.scope = req.body.scope;
+    if (req.body.label !== undefined) patch.label = req.body.label;
+    return opts.store.agentTokens.update(req.params.id, patch);
   });
 
   app.delete<{ Params: { id: string } }>(
