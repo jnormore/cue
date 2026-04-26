@@ -111,25 +111,31 @@ describe("daemon smoke", () => {
     expect(names).toEqual(
       [
         "create_action",
+        "create_artifact",
         "create_namespace",
         "create_trigger",
         "delete_action",
+        "delete_artifact",
         "delete_namespace",
         "delete_trigger",
         "doctor",
         "get_action",
+        "get_artifact",
         "get_namespace",
         "get_trigger",
         "inspect_run",
         "invoke_action",
         "list_action_runs",
         "list_actions",
+        "list_artifacts",
         "list_triggers",
+        "read_artifact",
         "set_secret",
         "state_append",
         "state_delete",
         "state_read",
         "update_action",
+        "update_artifact",
         "update_namespace",
         "whoami",
       ].sort(),
@@ -256,6 +262,38 @@ describe("daemon smoke", () => {
     expect(envelope.input).toEqual(payload);
     // request.body still populated for actions that need HTTP context.
     expect(envelope.request.body).toEqual(payload);
+  });
+
+  it("webhook accepts `?t=<token>` in query string (browser-friendly auth)", async () => {
+    const created = (await agent.callTool({
+      name: "create_action",
+      arguments: {
+        name: "smoke-hook-qt",
+        code: "console.log('ok')",
+        namespace: "smoke",
+      },
+    })) as CallToolResult;
+    const action = parseToolText(created) as { id: string };
+    const trigCreate = (await agent.callTool({
+      name: "create_trigger",
+      arguments: { type: "webhook", actionId: action.id },
+    })) as CallToolResult;
+    const trg = parseToolText(trigCreate) as {
+      webhookUrl: string;
+      webhookToken: string;
+    };
+
+    // GET with token in query string — what a browser anchor click does.
+    const r = await fetch(`${trg.webhookUrl}?t=${trg.webhookToken}`);
+    expect(r.status).toBe(200);
+
+    // Wrong query token rejected.
+    const wrong = await fetch(`${trg.webhookUrl}?t=tok_wrong`);
+    expect(wrong.status).toBe(401);
+
+    // No token at all rejected.
+    const none = await fetch(trg.webhookUrl);
+    expect(none.status).toBe(401);
   });
 
   it("master token cannot be used against /w/:id (webhook requires scoped token)", async () => {

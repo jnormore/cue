@@ -8,6 +8,7 @@ import type { McpToolDeps } from "./mcp-tools.js";
 import { bootstrapNamespaces } from "./bootstrap.js";
 import { actionsRoutes } from "./routes/actions.js";
 import { adminRoutes } from "./routes/admin.js";
+import { artifactsRoutes } from "./routes/artifacts.js";
 import { healthRoutes } from "./routes/health.js";
 import { mcpRoutes } from "./routes/mcp.js";
 import { stateRoutes } from "./routes/state.js";
@@ -78,6 +79,11 @@ export async function buildServer(opts: BuildServerOpts): Promise<BuiltServer> {
     cronRegistry,
     invokeUrlFor: (id) => `${opts.baseUrl}/a/${id}`,
     webhookUrlFor: (id) => `${opts.baseUrl}/w/${id}`,
+    artifactUrlFor: (ns, path) =>
+      `${opts.baseUrl}/u/${encodeURIComponent(ns)}/${path
+        .split("/")
+        .map((s) => encodeURIComponent(s))
+        .join("/")}`,
     cueVersion: opts.cueVersion ?? "0.1.0",
   };
 
@@ -118,6 +124,9 @@ export async function buildServer(opts: BuildServerOpts): Promise<BuiltServer> {
   await app.register(actionsRoutes(opts));
   await app.register(webhookRoutes(opts));
   await app.register(
+    artifactsRoutes({ store: opts.store, token: opts.token }),
+  );
+  await app.register(
     stateRoutes({ state: opts.state, store: opts.store, token: opts.token }),
   );
   await app.register(
@@ -127,6 +136,7 @@ export async function buildServer(opts: BuildServerOpts): Promise<BuiltServer> {
       token: opts.token,
       invokeUrlFor: mcpDepsBase.invokeUrlFor,
       webhookUrlFor: mcpDepsBase.webhookUrlFor,
+      artifactUrlFor: mcpDepsBase.artifactUrlFor,
     }),
   );
   await app.register(mcpRoutes({ deps: mcpDepsBase, token: opts.token }));

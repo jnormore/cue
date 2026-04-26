@@ -24,7 +24,8 @@ But durable work needs somewhere to live. Not a conversation context that evapor
 - **Addressable** — every action gets a stable `http://<host>:<port>/a/<id>` invoke URL + bearer token so UIs, webhooks, and humans can call it
 - **MCP server** — stdio _and_ streamable-HTTP transports, same tool surface, one daemon. Local agents over stdio; remote/multi-tenant over HTTP.
 - **Policy** (inherited from unitask) — per-action `allowNet`, `allowTcp`, `secrets`, `files`, `dirs`, `timeoutSeconds`, `memoryMb`. Project-root `.cue.toml` sets the ceiling; effective policy = intersection.
-- **Namespaces** — first-class isolation boundary with lifecycle (`active | paused | archived`). Every action, trigger, secret, and state entry is namespace-scoped. `cue ns create | list | inspect | pause | resume | archive | delete` covers the full lifecycle; `pause` stops invocations without deleting state, `archive` is read-only/frozen, `delete` cascades.
+- **Namespaces** — first-class isolation boundary with lifecycle (`active | paused | archived`). Every action, trigger, secret, state entry, and artifact is namespace-scoped. `cue ns create | list | inspect | pause | resume | archive | delete` covers the full lifecycle; `pause` stops invocations without deleting state, `archive` is read-only/frozen, `delete` cascades.
+- **Artifacts** — agent-hosted static assets (HTML/JS/CSS/images). The agent uploads bytes via `create_artifact`; cue serves them at `GET /u/<namespace>/<path>` on the same origin as webhooks, so browser-side fetches to `/w/:id` work without CORS or mixed-content issues. Public by default; per-artifact view tokens for non-public.
 - **Storage** — SQLite for metadata, local disk for run blobs. Postgres + S3-compatible adapters designed for fleet, not yet shipped. See [docs/storage.md](./docs/storage.md).
 - **Run records** — every invocation captures stdout, stderr, exit, input, trigger id, and the unitask run id; metadata in SQL, output bytes in `~/.cue/blobs/runs/<id>/`.
 - **`doctor`** — verifies unitask is on PATH, the daemon is up, the port is reachable
@@ -151,6 +152,8 @@ For operator-style tooling (minting tokens, managing all namespaces, invoking ac
 - `create_trigger({ type, config, actionId, namespace? })` → `{ id, webhookUrl? }`
 - `delete_trigger(id)` / `get_trigger(id)` / `list_triggers(namespace?)`
 - `set_secret(namespace, name, value)` — store a secret scoped to one namespace; read by actions declaring it in `policy.secrets`
+- `create_artifact(namespace, path, content, mimeType?, public?)` → `{ url, viewToken? }` — publish a static asset under the namespace, served at `GET /u/<namespace>/<path>` on the daemon
+- `update_artifact(namespace, path, patch)` / `get_artifact` / `read_artifact` / `list_artifacts(namespace)` / `delete_artifact(namespace, path)`
 - `state_append(namespace, key, entry)` → `{ seq, at }` — append to a namespace's shared log (see [State](#state))
 - `state_read(namespace, key, since?, limit?)` → `{ entries, lastSeq }`
 - `state_delete(namespace, key)`

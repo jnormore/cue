@@ -221,6 +221,75 @@ export interface NamespaceStore {
 }
 
 /**
+ * Static assets the agent publishes under a namespace. Bytes live in
+ * the blob store at `artifacts/<namespace>/<path>`; metadata rows
+ * track MIME, size, and per-artifact view tokens for non-public
+ * artifacts.
+ *
+ * URL: GET /u/<namespace>/<path>. Public artifacts (the default) have
+ * no auth on the URL. Non-public artifacts require ?t=<viewToken>
+ * (URL-bearable so a `<script src>` / `<link href>` works without a
+ * custom Authorization header).
+ */
+export interface ArtifactRecord {
+  namespace: string;
+  path: string;
+  mimeType: string;
+  size: number;
+  public: boolean;
+  /** Per-artifact view token; empty string when public. */
+  viewToken: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ArtifactSummary {
+  namespace: string;
+  path: string;
+  mimeType: string;
+  size: number;
+  public: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ArtifactCreateInput {
+  namespace: string;
+  path: string;
+  /** Bytes as a string (utf8) or Buffer. Capped at ARTIFACT_MAX_BYTES. */
+  content: string | Buffer;
+  /** Defaults to ext-based detection; agent can override. */
+  mimeType?: string;
+  /** Defaults to true. Non-public artifacts get a viewToken. */
+  public?: boolean;
+}
+
+export interface ArtifactPatch {
+  /** Replace bytes. */
+  content?: string | Buffer;
+  /** Override MIME (re-detect if undefined and content changed). */
+  mimeType?: string;
+  /** Toggle public/non-public. Token rotates on every transition. */
+  public?: boolean;
+}
+
+export interface ArtifactStore {
+  get(namespace: string, path: string): Promise<ArtifactRecord | null>;
+  list(namespace: string): Promise<ArtifactSummary[]>;
+  create(input: ArtifactCreateInput): Promise<ArtifactRecord>;
+  update(
+    namespace: string,
+    path: string,
+    patch: ArtifactPatch,
+  ): Promise<ArtifactRecord>;
+  delete(namespace: string, path: string): Promise<void>;
+  /** Cascade — used by deleteNamespace. Returns the paths removed. */
+  deleteNamespace(namespace: string): Promise<string[]>;
+  /** Read raw content as utf8 string. null if not found. */
+  read(namespace: string, path: string): Promise<string | null>;
+}
+
+/**
  * Per-namespace secret store. Secrets are read-only from the MCP surface
  * (materialized only inside the action unikernel). Writing happens via
  * `set_secret`; tearing down a namespace wipes its secrets.
@@ -303,6 +372,7 @@ export interface StoreAdapter {
   triggers: TriggerStore;
   runs: RunStore;
   secrets: SecretStore;
+  artifacts: ArtifactStore;
   agentTokens: AgentTokenStore;
   /**
    * Run `fn` inside a transaction. The adapter passed to `fn` is the
@@ -317,9 +387,12 @@ export interface StoreAdapter {
 export const NAME_MAX = 128;
 export const NAMESPACE_MAX = 64;
 export const SECRET_NAME_MAX = 128;
+export const ARTIFACT_PATH_MAX = 256;
+export const ARTIFACT_MAX_BYTES = 10 * 1024 * 1024; // 10MB
 export const DEFAULT_NAMESPACE = "default";
 const NAME_RE = /^[a-z0-9-]+$/;
 const SECRET_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const ARTIFACT_PATH_RE = /^[a-zA-Z0-9._/-]+$/;
 
 export function validateName(name: string): void {
   if (!name || name.length > NAME_MAX || !NAME_RE.test(name)) {
@@ -402,6 +475,36 @@ export function validateSecretName(name: string): void {
   }
 }
 
+/**
+ * Validate an artifact path. The blob-store fs adapter normalizes
+ * paths via `path.join`, but we reject anything funky at the API
+ * boundary so the contract is explicit and traversal attempts fail
+ * loudly rather than silently landing in an unexpected directory.
+ */
+export function validateArtifactPath(p: string): void {
+  if (!p || p.length > ARTIFACT_PATH_MAX || !ARTIFACT_PATH_RE.test(p)) {
+    throw new StoreError(
+      "ValidationError",
+      `Invalid artifact path "${p}" (must match ${ARTIFACT_PATH_RE} and be ≤${ARTIFACT_PATH_MAX} chars)`,
+      { path: p },
+    );
+  }
+  if (p.startsWith("/") || p.endsWith("/")) {
+    throw new StoreError(
+      "ValidationError",
+      `Invalid artifact path "${p}" (must not start or end with '/')`,
+      { path: p },
+    );
+  }
+  if (p.includes("..") || p.includes("//")) {
+    throw new StoreError(
+      "ValidationError",
+      `Invalid artifact path "${p}" (must not contain '..' or '//')`,
+      { path: p },
+    );
+  }
+}
+
 export const newActionId = (): ActionId => `act_${ulid()}`;
 export const newTriggerId = (): TriggerId => `trg_${ulid()}`;
 export const newRunId = (): RunId => `run_${ulid()}`;
@@ -461,6 +564,8 @@ export interface NamespaceDeletion {
   secrets: string[];
   /** Log keys that existed in this namespace and got wiped. */
   stateKeys: string[];
+  /** Artifact paths that existed in this namespace and got wiped. */
+  artifacts: string[];
 }
 
 export async function deleteNamespace(
@@ -481,6 +586,7 @@ export async function deleteNamespace(
   const stateKeys = await state.log.list(namespace);
   await state.log.deleteNamespace(namespace);
   await state.tokens.deleteNamespace(namespace);
+  const artifactPaths = await store.artifacts.deleteNamespace(namespace);
   // Last: drop the metadata row. Doing this last means a partial
   // failure leaves the metadata in place so the cascade can be
   // retried; the metadata is the bookkeeping for the contents below.
@@ -490,5 +596,6 @@ export async function deleteNamespace(
     triggers: toKill.map((t) => t.id),
     secrets: secretNames,
     stateKeys,
+    artifacts: artifactPaths,
   };
 }

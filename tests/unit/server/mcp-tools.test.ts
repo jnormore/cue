@@ -104,6 +104,7 @@ describe("mcp-tools", () => {
       cronRegistry: registry,
       invokeUrlFor: (id) => `http://localhost:4747/a/${id}`,
       webhookUrlFor: (id) => `http://localhost:4747/w/${id}`,
+      artifactUrlFor: (ns, p) => `http://localhost:4747/u/${ns}/${p}`,
       cueVersion: "0.1.0",
       principal: { type: "master" },
     };

@@ -7,6 +7,7 @@ import type { StoreAdapter } from "../../index.js";
 import { runMigrations } from "../runner.js";
 import { sqliteActions } from "./actions.js";
 import { sqliteAgentTokens } from "./agent-tokens.js";
+import { sqliteArtifacts } from "./artifacts.js";
 import { sqliteNamespaces } from "./namespaces.js";
 import { sqliteRuns } from "./runs.js";
 import { sqliteSecrets } from "./secrets.js";
@@ -32,6 +33,7 @@ function buildAdapter(state: SqliteStoreState): StoreAdapter {
     triggers: sqliteTriggers(state.db),
     runs: sqliteRuns(state.db, state.blob),
     secrets: sqliteSecrets(state.db),
+    artifacts: sqliteArtifacts(state.db, state.blob),
     agentTokens: sqliteAgentTokens(state.db),
 
     async doctor() {

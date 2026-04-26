@@ -6,6 +6,8 @@ import { validateKey } from "../state/index.js";
 import {
   type ActionRecord,
   type ActionSummary,
+  type ArtifactRecord,
+  type ArtifactSummary,
   type CronConfig,
   type NamespaceRecord,
   type NamespaceStatus,
@@ -34,6 +36,7 @@ export interface McpToolDeps extends InvokeDeps {
   cronRegistry: CronRegistry;
   invokeUrlFor: (id: string) => string;
   webhookUrlFor: (id: string) => string;
+  artifactUrlFor: (namespace: string, path: string) => string;
   cueVersion: string;
   /**
    * The authenticated caller for this MCP session. Master principals
@@ -337,6 +340,7 @@ export async function deleteNamespaceTool(
     triggers: string[];
     secrets: string[];
     stateKeys: string[];
+    artifacts: string[];
   };
 }> {
   requireNamespace(deps.principal, args.name, "delete");
@@ -350,9 +354,148 @@ export async function deleteNamespaceTool(
       triggers: result.triggers,
       secrets: result.secrets,
       stateKeys: result.stateKeys,
+      artifacts: result.artifacts,
     },
   };
 }
+
+// ---------- artifacts ----------
+
+export interface ArtifactRef {
+  namespace: string;
+  path: string;
+  url: string;
+  /** Empty when public. Returned only on create/update if non-public. */
+  viewToken?: string;
+  mimeType: string;
+  size: number;
+  public: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function toArtifactRef(deps: McpToolDeps, rec: ArtifactRecord): ArtifactRef {
+  const out: ArtifactRef = {
+    namespace: rec.namespace,
+    path: rec.path,
+    url: deps.artifactUrlFor(rec.namespace, rec.path),
+    mimeType: rec.mimeType,
+    size: rec.size,
+    public: rec.public,
+    createdAt: rec.createdAt,
+    updatedAt: rec.updatedAt,
+  };
+  if (!rec.public && rec.viewToken) out.viewToken = rec.viewToken;
+  return out;
+}
+
+export async function createArtifact(
+  deps: McpToolDeps,
+  args: {
+    namespace: string;
+    path: string;
+    content: string;
+    mimeType?: string;
+    public?: boolean;
+  },
+): Promise<ArtifactRef> {
+  validateNamespace(args.namespace);
+  requireNamespace(deps.principal, args.namespace, "create artifact in");
+  await assertNamespaceMutable(deps.store, args.namespace);
+  const created = await deps.store.artifacts.create({
+    namespace: args.namespace,
+    path: args.path,
+    content: args.content,
+    ...(args.mimeType !== undefined ? { mimeType: args.mimeType } : {}),
+    ...(args.public !== undefined ? { public: args.public } : {}),
+  });
+  return toArtifactRef(deps, created);
+}
+
+export async function updateArtifact(
+  deps: McpToolDeps,
+  args: {
+    namespace: string;
+    path: string;
+    patch: { content?: string; mimeType?: string; public?: boolean };
+  },
+): Promise<ArtifactRef> {
+  validateNamespace(args.namespace);
+  requireNamespace(deps.principal, args.namespace, "update artifact in");
+  await assertNamespaceMutable(deps.store, args.namespace);
+  const updated = await deps.store.artifacts.update(
+    args.namespace,
+    args.path,
+    {
+      ...(args.patch.content !== undefined
+        ? { content: args.patch.content }
+        : {}),
+      ...(args.patch.mimeType !== undefined
+        ? { mimeType: args.patch.mimeType }
+        : {}),
+      ...(args.patch.public !== undefined
+        ? { public: args.patch.public }
+        : {}),
+    },
+  );
+  return toArtifactRef(deps, updated);
+}
+
+export async function getArtifact(
+  deps: McpToolDeps,
+  args: { namespace: string; path: string },
+): Promise<ArtifactRef> {
+  validateNamespace(args.namespace);
+  requireNamespace(deps.principal, args.namespace, "read artifact in");
+  const rec = await deps.store.artifacts.get(args.namespace, args.path);
+  if (!rec) {
+    throw new StoreError(
+      "NotFound",
+      `Artifact "${args.path}" not found in namespace "${args.namespace}"`,
+      { namespace: args.namespace, path: args.path },
+    );
+  }
+  return toArtifactRef(deps, rec);
+}
+
+export async function readArtifact(
+  deps: McpToolDeps,
+  args: { namespace: string; path: string },
+): Promise<{ content: string }> {
+  validateNamespace(args.namespace);
+  requireNamespace(deps.principal, args.namespace, "read artifact in");
+  const content = await deps.store.artifacts.read(args.namespace, args.path);
+  if (content === null) {
+    throw new StoreError(
+      "NotFound",
+      `Artifact "${args.path}" not found in namespace "${args.namespace}"`,
+      { namespace: args.namespace, path: args.path },
+    );
+  }
+  return { content };
+}
+
+export async function listArtifacts(
+  deps: McpToolDeps,
+  args: { namespace: string },
+): Promise<ArtifactSummary[]> {
+  validateNamespace(args.namespace);
+  requireNamespace(deps.principal, args.namespace, "list artifacts in");
+  return deps.store.artifacts.list(args.namespace);
+}
+
+export async function deleteArtifactTool(
+  deps: McpToolDeps,
+  args: { namespace: string; path: string },
+): Promise<{ deleted: { namespace: string; path: string } }> {
+  validateNamespace(args.namespace);
+  requireNamespace(deps.principal, args.namespace, "delete artifact in");
+  await assertNamespaceMutable(deps.store, args.namespace);
+  await deps.store.artifacts.delete(args.namespace, args.path);
+  return { deleted: { namespace: args.namespace, path: args.path } };
+}
+
+// ---------- whoami ----------
 
 export interface WhoamiNamespace {
   name: string;

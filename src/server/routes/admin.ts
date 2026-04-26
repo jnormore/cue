@@ -26,6 +26,8 @@ export interface AdminRoutesOpts {
   invokeUrlFor(id: string): string;
   /** Build absolute webhook URLs for trigger create/get responses. */
   webhookUrlFor(id: string): string;
+  /** Build absolute artifact URLs for artifact list/get responses. */
+  artifactUrlFor(namespace: string, path: string): string;
 }
 
 /**
@@ -49,6 +51,7 @@ export function adminRoutes(opts: AdminRoutesOpts): FastifyPluginAsync {
     registerTriggerRoutes(app, opts);
     registerSecretRoutes(app, opts);
     registerAgentTokenRoutes(app, opts);
+    registerArtifactRoutes(app, opts);
     registerNamespaceRoutes(app, opts);
   };
 }
@@ -226,6 +229,60 @@ function registerSecretRoutes(
   );
 }
 
+// ---------- artifacts ----------
+
+function registerArtifactRoutes(
+  app: Parameters<FastifyPluginAsync>[0],
+  opts: AdminRoutesOpts,
+): void {
+  // List all artifacts in a namespace. Decorate with the public URL
+  // so operator UIs can render links without reconstructing them.
+  // Bytes are intentionally omitted — use GET /u/:namespace/* for those.
+  app.get<{ Params: { namespace: string } }>(
+    "/admin/artifacts/:namespace",
+    async (req) => {
+      validateNamespace(req.params.namespace);
+      const list = await opts.store.artifacts.list(req.params.namespace);
+      return list.map((a) => ({
+        ...a,
+        url: opts.artifactUrlFor(a.namespace, a.path),
+      }));
+    },
+  );
+
+  // Fetch a single artifact's metadata. Returns the full record (including
+  // the per-artifact viewToken for non-public artifacts), so an operator
+  // can construct a private-share URL. Bytes still come from /u/:ns/*.
+  app.get<{ Params: { namespace: string; "*": string } }>(
+    "/admin/artifacts/:namespace/*",
+    async (req, reply) => {
+      validateNamespace(req.params.namespace);
+      const path = req.params["*"];
+      const rec = await opts.store.artifacts.get(req.params.namespace, path);
+      if (!rec) {
+        reply.code(404).send({
+          error: `Artifact "${path}" not found in namespace "${req.params.namespace}"`,
+          kind: "NotFound",
+        });
+        return;
+      }
+      return { ...rec, url: opts.artifactUrlFor(rec.namespace, rec.path) };
+    },
+  );
+
+  // Operator-side delete. Useful when an agent token is revoked or the
+  // operator needs to remove an artifact without going through MCP.
+  app.delete<{ Params: { namespace: string; "*": string } }>(
+    "/admin/artifacts/:namespace/*",
+    async (req) => {
+      validateNamespace(req.params.namespace);
+      const path = req.params["*"];
+      await opts.store.artifacts.delete(req.params.namespace, path);
+      return { deleted: { namespace: req.params.namespace, path } };
+    },
+  );
+}
+
 // ---------- agent tokens ----------
 
 function registerAgentTokenRoutes(
@@ -359,6 +416,7 @@ function registerNamespaceRoutes(
           triggers: result.triggers,
           secrets: result.secrets,
           stateKeys: result.stateKeys,
+          artifacts: result.artifacts,
         },
       };
     },
