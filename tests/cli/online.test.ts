@@ -69,7 +69,7 @@ describe.skipIf(!unitaskAvailable)(
     }
 
     it("cue doctor reports ok across adapters", () => {
-      const r = cue(["doctor"]);
+      const r = cue(["doctor", "--json"]);
       expect(r.status).toBe(0);
       const body = JSON.parse(r.stdout);
       expect(body.cue.daemonUp).toBe(true);

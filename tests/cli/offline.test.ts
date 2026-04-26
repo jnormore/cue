@@ -56,7 +56,7 @@ describe("cue CLI (offline — no daemon required)", () => {
       // doctor probes each adapter in-process and only pings /health for
       // daemon liveness. No daemon → that ping fails, but the command
       // itself completes normally.
-      const r = run(["doctor"], { CUE_HOME: home });
+      const r = run(["doctor", "--json"], { CUE_HOME: home });
       expect(r.status).toBe(0);
       const body = JSON.parse(r.stdout) as {
         cue: { daemonUp: boolean };
@@ -66,6 +66,21 @@ describe("cue CLI (offline — no daemon required)", () => {
       expect(body.cue.daemonUp).toBe(false);
       expect(body.store.ok).toBe(true);
       expect(body.state.ok).toBe(true);
+    });
+
+    it("cue doctor (default) prints a friendly text summary", () => {
+      const r = run(["doctor"], { CUE_HOME: home });
+      expect(r.status).toBe(0);
+      // Summary lists each adapter with status + name; daemon is DOWN
+      // because no port file exists for this fresh home.
+      expect(r.stdout).toContain("cue 0.1.0");
+      expect(r.stdout).toMatch(/daemon:\s+DOWN/);
+      expect(r.stdout).toMatch(/store:\s+ok\s+sqlite/);
+      expect(r.stdout).toMatch(/state:\s+ok\s+sqlite/);
+      expect(r.stdout).toMatch(/runtime:\s+/);
+      expect(r.stdout).toMatch(/cron:\s+ok\s+node-cron/);
+      // No JSON in default mode.
+      expect(r.stdout).not.toMatch(/^\s*\{/);
     });
 
     it("cue token list with no daemon fails fast with a clear message", () => {
