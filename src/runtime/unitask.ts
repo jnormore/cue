@@ -106,6 +106,14 @@ export function unitaskRuntime(opts: UnitaskRuntimeOpts = {}): ActionRuntime {
           env.CUE_STATE_URL = args.state.url;
           env.CUE_STATE_TOKEN = args.state.token;
         }
+        // `--secret X` is unitask's "forward env var X into the guest"
+        // flag, AND it's strict — unitask exits 2 if X isn't set on the
+        // host. We don't want that strictness for declared-but-unset
+        // values: cron firing every minute when MONITOR_URL hasn't been
+        // configured yet shouldn't spam "env var not set" errors. Better
+        // to start the action with an undefined env var and let the
+        // action decide (skip work, log "not configured", whatever).
+        cmdArgs.push(...policyEnvFlags(args.policy, env));
         const r = await exec(bin, cmdArgs, {
           stdin: "",
           timeoutMs: args.timeoutMs,
@@ -166,6 +174,12 @@ export function buildSubprocessEnv(
   return env;
 }
 
+/**
+ * Translate a policy into unitask CLI flags. Note: env-var forwarding
+ * flags (`--secret X`) are NOT emitted here — that's done by
+ * `policyEnvFlags`, which gets the resolved env so it can skip names
+ * that aren't actually set. See the call site in `run()` for why.
+ */
 export function policyToFlags(policy: Policy): string[] {
   const flags: string[] = [];
   if (policy.memoryMb !== undefined) {
@@ -176,9 +190,40 @@ export function policyToFlags(policy: Policy): string[] {
   }
   for (const host of policy.allowNet ?? []) flags.push("--allow-net", host);
   for (const tcp of policy.allowTcp ?? []) flags.push("--allow-tcp", tcp);
-  for (const s of policy.secrets ?? []) flags.push("--secret", s);
   for (const f of policy.files ?? []) flags.push("--file", f);
   for (const d of policy.dirs ?? []) flags.push("--dir", d);
+  return flags;
+}
+
+/**
+ * Emit `--secret`/`--env` for each declared secret/config that has an
+ * actual value in `env`. Skipped names land in the guest as undefined;
+ * the action is responsible for handling that case (e.g. logging "not
+ * configured" and exiting cleanly). The alternative — emit the flag
+ * unconditionally — makes unitask refuse to launch when any declared
+ * name is unset, which spams cron firings and produces a worse error
+ * than the action could surface itself.
+ *
+ * Secrets get `--secret`: redacted from output, only the name is
+ * persisted to the run record.
+ *
+ * Configs get `--env`: NOT redacted, name+value persisted. Use for
+ * non-sensitive runtime values (URLs, thresholds, channel names) that
+ * the operator benefits from being able to see. Routing configs
+ * through `--secret` would log them as `[REDACTED:NAME]` and break
+ * any dashboard that echoes the config value back to the user.
+ */
+export function policyEnvFlags(
+  policy: Policy,
+  env: Record<string, string>,
+): string[] {
+  const flags: string[] = [];
+  for (const s of policy.secrets ?? []) {
+    if (env[s] !== undefined) flags.push("--secret", s);
+  }
+  for (const c of policy.configs ?? []) {
+    if (env[c] !== undefined) flags.push("--env", c);
+  }
   return flags;
 }
 

@@ -50,6 +50,7 @@ export function adminRoutes(opts: AdminRoutesOpts): FastifyPluginAsync {
     registerActionRoutes(app, opts);
     registerTriggerRoutes(app, opts);
     registerSecretRoutes(app, opts);
+    registerConfigRoutes(app, opts);
     registerAgentTokenRoutes(app, opts);
     registerArtifactRoutes(app, opts);
     registerNamespaceRoutes(app, opts);
@@ -229,6 +230,66 @@ function registerSecretRoutes(
   );
 }
 
+// ---------- configs ----------
+
+function registerConfigRoutes(
+  app: Parameters<FastifyPluginAsync>[0],
+  opts: AdminRoutesOpts,
+): void {
+  app.put<{
+    Params: { namespace: string; name: string };
+    Body: { value: string };
+  }>("/admin/configs/:namespace/:name", async (req) => {
+    await assertNamespaceMutable(opts.store, req.params.namespace);
+    await opts.store.configs.set(
+      req.params.namespace,
+      req.params.name,
+      req.body.value,
+    );
+    return { namespace: req.params.namespace, name: req.params.name };
+  });
+
+  // Configs differ from secrets here: list returns full entries (name +
+  // value + timestamps), and there's a per-key GET that returns the
+  // value. Secrets deliberately don't have either of those.
+  app.get<{ Params: { namespace: string } }>(
+    "/admin/configs/:namespace",
+    async (req) => {
+      const entries = await opts.store.configs.list(req.params.namespace);
+      return { namespace: req.params.namespace, entries };
+    },
+  );
+
+  app.get<{ Params: { namespace: string; name: string } }>(
+    "/admin/configs/:namespace/:name",
+    async (req, reply) => {
+      const value = await opts.store.configs.get(
+        req.params.namespace,
+        req.params.name,
+      );
+      if (value === null) {
+        reply.code(404).send({
+          error: `Config "${req.params.name}" not set in namespace "${req.params.namespace}"`,
+        });
+        return;
+      }
+      return {
+        namespace: req.params.namespace,
+        name: req.params.name,
+        value,
+      };
+    },
+  );
+
+  app.delete<{ Params: { namespace: string; name: string } }>(
+    "/admin/configs/:namespace/:name",
+    async (req) => {
+      await opts.store.configs.delete(req.params.namespace, req.params.name);
+      return { deleted: req.params.name, namespace: req.params.namespace };
+    },
+  );
+}
+
 // ---------- artifacts ----------
 
 function registerArtifactRoutes(
@@ -379,17 +440,20 @@ function registerNamespaceRoutes(
         });
         return;
       }
-      const [actions, triggers, secretNames, stateKeys] = await Promise.all([
-        opts.store.actions.list({ namespace: req.params.name }),
-        opts.store.triggers.list({ namespace: req.params.name }),
-        opts.store.secrets.list(req.params.name),
-        opts.state.log.list(req.params.name),
-      ]);
+      const [actions, triggers, secretNames, configEntries, stateKeys] =
+        await Promise.all([
+          opts.store.actions.list({ namespace: req.params.name }),
+          opts.store.triggers.list({ namespace: req.params.name }),
+          opts.store.secrets.list(req.params.name),
+          opts.store.configs.list(req.params.name),
+          opts.state.log.list(req.params.name),
+        ]);
       return {
         ...ns,
         actionCount: actions.length,
         triggerCount: triggers.length,
         secretCount: secretNames.length,
+        configCount: configEntries.length,
         stateKeyCount: stateKeys.length,
       };
     },
@@ -415,6 +479,7 @@ function registerNamespaceRoutes(
           actions: result.actions,
           triggers: result.triggers,
           secrets: result.secrets,
+          configs: result.configs,
           stateKeys: result.stateKeys,
           artifacts: result.artifacts,
         },

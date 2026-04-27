@@ -6,6 +6,7 @@ import type { SubprocessExec } from "../../../src/runtime/unitask.js";
 import {
   ENVELOPE_FILENAME,
   buildSubprocessEnv,
+  policyEnvFlags,
   policyToFlags,
   unitaskRuntime,
 } from "../../../src/runtime/unitask.js";
@@ -26,13 +27,16 @@ describe("policyToFlags", () => {
     expect(policyToFlags({})).toEqual([]);
   });
 
-  it("maps every supported field", () => {
+  it("maps every supported field (env-forwarding handled separately)", () => {
     expect(
       policyToFlags({
         memoryMb: 256,
         timeoutSeconds: 30,
         allowNet: ["a", "b"],
         allowTcp: ["127.0.0.1:5432"],
+        // secrets / configs are intentionally not in policyToFlags's
+        // output — they're emitted by policyEnvFlags, which can see
+        // the resolved env and skip unset names.
         secrets: ["GH_TOKEN"],
         files: ["/etc/x"],
         dirs: ["/var/cache"],
@@ -48,8 +52,6 @@ describe("policyToFlags", () => {
       "b",
       "--allow-tcp",
       "127.0.0.1:5432",
-      "--secret",
-      "GH_TOKEN",
       "--file",
       "/etc/x",
       "--dir",
@@ -59,6 +61,57 @@ describe("policyToFlags", () => {
 
   it("omits fields that are undefined or empty arrays", () => {
     expect(policyToFlags({ allowNet: [], memoryMb: undefined })).toEqual([]);
+  });
+});
+
+describe("policyEnvFlags", () => {
+  it("emits --secret for every declared secret that has a value", () => {
+    expect(
+      policyEnvFlags(
+        { secrets: ["GH_TOKEN", "STRIPE_KEY"] },
+        { GH_TOKEN: "ghs_x", STRIPE_KEY: "sk_y" },
+      ),
+    ).toEqual([
+      "--secret",
+      "GH_TOKEN",
+      "--secret",
+      "STRIPE_KEY",
+    ]);
+  });
+
+  it("emits --env (not --secret) for every declared config that has a value", () => {
+    // The split matters: unitask redacts --secret values from output but
+    // not --env values. Routing configs through --env keeps URLs,
+    // thresholds, channel names etc. visible in dashboards/logs while
+    // sensitive values stay opaque.
+    expect(
+      policyEnvFlags(
+        { configs: ["MONITOR_URL", "THRESHOLD"] },
+        { MONITOR_URL: "https://x", THRESHOLD: "100" },
+      ),
+    ).toEqual(["--env", "MONITOR_URL", "--env", "THRESHOLD"]);
+  });
+
+  it("skips declared names that are unset (the cron-fires-too-early case)", () => {
+    expect(
+      policyEnvFlags(
+        { secrets: ["MISSING_SECRET"], configs: ["MONITOR_URL"] },
+        { MONITOR_URL: "https://x" },
+      ),
+    ).toEqual(["--env", "MONITOR_URL"]);
+  });
+
+  it("mixes --secret for secrets and --env for configs in one call", () => {
+    expect(
+      policyEnvFlags(
+        { secrets: ["GH_TOKEN"], configs: ["MONITOR_URL"] },
+        { GH_TOKEN: "ghs_x", MONITOR_URL: "https://x" },
+      ),
+    ).toEqual(["--secret", "GH_TOKEN", "--env", "MONITOR_URL"]);
+  });
+
+  it("returns [] when policy has no secrets or configs", () => {
+    expect(policyEnvFlags({}, {})).toEqual([]);
   });
 });
 

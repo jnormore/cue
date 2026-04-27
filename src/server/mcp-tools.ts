@@ -18,6 +18,8 @@ import {
   type Policy,
   type RunRecord,
   type RunSummary,
+  type ConfigEntry,
+  validateConfigName,
   validateNamespace,
   validateSecretName,
 } from "../store/index.js";
@@ -653,6 +655,58 @@ export async function setSecret(
   await assertNamespaceMutable(deps.store, args.namespace);
   await deps.store.secrets.set(args.namespace, args.name, args.value);
   return { ok: true, namespace: args.namespace, name: args.name };
+}
+
+export async function setConfig(
+  deps: McpToolDeps,
+  args: { namespace: string; name: string; value: string },
+): Promise<{ ok: true; namespace: string; name: string }> {
+  validateNamespace(args.namespace);
+  validateConfigName(args.name);
+  requireNamespace(deps.principal, args.namespace, "write configs in");
+  await assertNamespaceMutable(deps.store, args.namespace);
+  await deps.store.configs.set(args.namespace, args.name, args.value);
+  return { ok: true, namespace: args.namespace, name: args.name };
+}
+
+export async function getConfig(
+  deps: McpToolDeps,
+  args: { namespace: string; name: string },
+): Promise<{ namespace: string; name: string; value: string }> {
+  validateNamespace(args.namespace);
+  validateConfigName(args.name);
+  requireNamespace(deps.principal, args.namespace, "read configs in");
+  const value = await deps.store.configs.get(args.namespace, args.name);
+  if (value === null) {
+    throw new StoreError(
+      "NotFound",
+      `Config "${args.name}" not set in namespace "${args.namespace}"`,
+      { namespace: args.namespace, name: args.name },
+    );
+  }
+  return { namespace: args.namespace, name: args.name, value };
+}
+
+export async function listConfigs(
+  deps: McpToolDeps,
+  args: { namespace: string },
+): Promise<{ namespace: string; entries: ConfigEntry[] }> {
+  validateNamespace(args.namespace);
+  requireNamespace(deps.principal, args.namespace, "list configs in");
+  const entries = await deps.store.configs.list(args.namespace);
+  return { namespace: args.namespace, entries };
+}
+
+export async function deleteConfig(
+  deps: McpToolDeps,
+  args: { namespace: string; name: string },
+): Promise<{ deleted: string; namespace: string }> {
+  validateNamespace(args.namespace);
+  validateConfigName(args.name);
+  requireNamespace(deps.principal, args.namespace, "delete configs in");
+  await assertNamespaceMutable(deps.store, args.namespace);
+  await deps.store.configs.delete(args.namespace, args.name);
+  return { deleted: args.name, namespace: args.namespace };
 }
 
 export async function appendState(

@@ -43,8 +43,13 @@ function makeRuntime(
     runtimeRunId: string;
   }> = {},
 ): { runtime: ActionRuntime; run: ReturnType<typeof vi.fn> } {
+  // Default to parseable JSON stdout so auth/route tests that don't care
+  // about the body still get a 200 — empty stdout under the new webhook
+  // contract triggers the 502 "did not return JSON" debug fallback,
+  // which is the right behavior in production but not what these tests
+  // are checking.
   const run = vi.fn().mockResolvedValue({
-    stdout: override.stdout ?? "",
+    stdout: override.stdout ?? "{}",
     stderr: override.stderr ?? "",
     exitCode: override.exitCode ?? 0,
     runtimeRunId: override.runtimeRunId ?? "u_MOCK",
@@ -242,6 +247,138 @@ describe("server", () => {
       // Default trigger uses bearer auth, surfaced in the envelope so the
       // action can make trust decisions without re-deriving from headers.
       expect(envelope.request.auth).toBe("bearer");
+    });
+
+    it("returns HTTP-shaped output as an actual HTTP response (status + body unwrapped)", async () => {
+      runMock.mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          status: 200,
+          headers: { "content-type": "application/json", "x-trace-id": "abc" },
+          body: { ok: true, monitorUrl: "https://example.com", checks: 21 },
+        }),
+        stderr: "",
+        exitCode: 0,
+        runtimeRunId: "u_HTTP",
+      });
+      const res = await app.inject({
+        method: "GET",
+        url: `/w/${trigger.id}`,
+        headers: { authorization: `Bearer ${scopedToken}` },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers["x-trace-id"]).toBe("abc");
+      // Body is the action's `body`, NOT an InvokeResult wrapper. The
+      // dashboard's `payload.monitorUrl` lookup now sees the real value
+      // instead of digging through `payload.stdout` JSON-in-JSON.
+      const body = res.json();
+      expect(body).toEqual({
+        ok: true,
+        monitorUrl: "https://example.com",
+        checks: 21,
+      });
+      expect(body).not.toHaveProperty("stdout");
+      expect(body).not.toHaveProperty("runId");
+    });
+
+    it("propagates the action's chosen status code (e.g. 4xx)", async () => {
+      runMock.mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          status: 400,
+          body: { ok: false, error: "Stripe-Signature missing" },
+        }),
+        stderr: "",
+        exitCode: 0,
+        runtimeRunId: "u_400",
+      });
+      const res = await app.inject({
+        method: "POST",
+        url: `/w/${trigger.id}`,
+        headers: { authorization: `Bearer ${scopedToken}` },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({
+        ok: false,
+        error: "Stripe-Signature missing",
+      });
+    });
+
+    it("returns plain JSON output as the response body (no Lambda-style wrapper required)", async () => {
+      // Many agent-built actions just `console.log(JSON.stringify({ok:true,...}))`
+      // without wrapping in {status, headers, body}. Caller should see
+      // the action's JSON directly — not an InvokeResult envelope.
+      runMock.mockResolvedValueOnce({
+        stdout: JSON.stringify({ ok: true, checks: [], monitorUrl: "https://x" }),
+        stderr: "",
+        exitCode: 0,
+        runtimeRunId: "u_PLAIN",
+      });
+      const res = await app.inject({
+        method: "GET",
+        url: `/w/${trigger.id}`,
+        headers: { authorization: `Bearer ${scopedToken}` },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body).toEqual({ ok: true, checks: [], monitorUrl: "https://x" });
+      expect(body).not.toHaveProperty("runId");
+      expect(body).not.toHaveProperty("stdout");
+    });
+
+    it("502s with debug envelope when the action prints nothing parseable", async () => {
+      runMock.mockResolvedValueOnce({
+        stdout: "not json at all",
+        stderr: "",
+        exitCode: 0,
+        runtimeRunId: "u_NOJSON",
+      });
+      const res = await app.inject({
+        method: "POST",
+        url: `/w/${trigger.id}`,
+        headers: { authorization: `Bearer ${scopedToken}` },
+        payload: { x: 1 },
+      });
+      expect(res.statusCode).toBe(502);
+      const body = res.json();
+      expect(body).toHaveProperty("error", "Action did not return JSON");
+      expect(body).toHaveProperty("runId");
+    });
+
+    it("500s when the action exits non-zero", async () => {
+      runMock.mockResolvedValueOnce({
+        stdout: "",
+        stderr: "ReferenceError: foo is not defined",
+        exitCode: 1,
+        runtimeRunId: "u_FAIL",
+      });
+      const res = await app.inject({
+        method: "POST",
+        url: `/w/${trigger.id}`,
+        headers: { authorization: `Bearer ${scopedToken}` },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(500);
+      const body = res.json();
+      expect(body.error).toBe("Action failed");
+      expect(body.exitCode).toBe(1);
+      expect(body.stderr).toContain("ReferenceError");
+    });
+
+    it("statusCode (Lambda alias) works as well as status", async () => {
+      runMock.mockResolvedValueOnce({
+        stdout: JSON.stringify({ statusCode: 201, body: { id: "x" } }),
+        stderr: "",
+        exitCode: 0,
+        runtimeRunId: "u_201",
+      });
+      const res = await app.inject({
+        method: "POST",
+        url: `/w/${trigger.id}`,
+        headers: { authorization: `Bearer ${scopedToken}` },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(201);
+      expect(res.json()).toEqual({ id: "x" });
     });
   });
 

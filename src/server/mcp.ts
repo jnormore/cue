@@ -28,6 +28,10 @@ import {
   readArtifact,
   readState,
   appendState,
+  setConfig,
+  getConfig,
+  listConfigs,
+  deleteConfig,
   setSecret,
   updateAction,
   updateArtifact,
@@ -42,6 +46,7 @@ const PolicyShape = z
     allowNet: z.array(z.string()).optional(),
     allowTcp: z.array(z.string()).optional(),
     secrets: z.array(z.string()).optional(),
+    configs: z.array(z.string()).optional(),
     files: z.array(z.string()).optional(),
     dirs: z.array(z.string()).optional(),
     state: z.boolean().optional(),
@@ -131,9 +136,21 @@ export function buildMcpServer(deps: McpToolDeps): McpServer {
         "parsed value; otherwise as a raw string. Don't `console.log` non-JSON before your final\n" +
         "JSON output, or `output` will be null.\n\n" +
         "Declared primitives in `policy` (all optional; each is off unless the action opts in):\n" +
-        "  allowNet: string[]    — hostnames (not URLs) the action can reach over HTTP(S).\n" +
+        "  allowNet: string[]    — hostnames (not URLs) the action can reach over HTTP(S). Three forms:\n" +
+        "                            • literal hostname for known endpoints: 'api.stripe.com', 'slack.com'.\n" +
+        "                            • '$CONFIG_NAME' for hostnames the user supplies at runtime — at invoke time\n" +
+        "                              this resolves to URL.hostname(env[CONFIG_NAME]). Use whenever the action\n" +
+        "                              fetches a URL the user puts in a config (e.g. allowNet: ['$MONITOR_URL']\n" +
+        "                              paired with configs: ['MONITOR_URL']). Refs to unset configs are silently\n" +
+        "                              dropped — the action can detect that with `if (!process.env.MONITOR_URL)`.\n" +
+        "                            • '*' for any host. Escape hatch for code that fetches across arbitrary\n" +
+        "                              domains (RSS readers, link summarizers, anything that takes a URL list).\n" +
+        "                              Prefer '$NAME' when the action only ever fetches one user-configured\n" +
+        "                              destination — narrower allowlist, same UX.\n" +
         "  allowTcp: string[]    — 'host:port' entries for raw TCP. Includes loopback (e.g. 127.0.0.1:5432).\n" +
-        "  secrets:  string[]    — names of secrets (set via set_secret) forwarded as env vars. Namespace-scoped.\n" +
+        "                            host can also be a $CONFIG_NAME ref (e.g. '$DB_HOST:5432').\n" +
+        "  secrets:  string[]    — names of SENSITIVE values (API keys, signing secrets, tokens) forwarded as env vars. Set via set_secret; values are write-only at the API surface, never returned by any read tool. Namespace-scoped.\n" +
+        "  configs:  string[]    — names of NON-SENSITIVE values (URLs, thresholds, channel names, recipient addresses) forwarded as env vars. Set via set_config; values are readable via get_config / list_configs and shown in the dashboard. Use these for anything the user benefits from being able to see and edit. Namespace-scoped.\n" +
         "  files:    string[]    — host file paths injected read-only; appear inside the guest at /<basename>.\n" +
         "  dirs:     string[]    — host directories injected read-only; appear inside the guest at /<basename>/.\n" +
         "  state:    boolean     — when true, `require('/cue-state')` inside the action yields:\n" +
@@ -388,7 +405,8 @@ export function buildMcpServer(deps: McpToolDeps): McpServer {
     "set_secret",
     {
       description:
-        "Store a secret scoped to a namespace. Read by actions in that same namespace that declare the name in policy.secrets. Secrets are write-only from this surface; values materialize only inside the action unikernel.",
+        "Store a SENSITIVE value (API key, signing secret, token, password) scoped to a namespace. Read by actions in that same namespace that declare the name in policy.secrets. Secrets are write-only from this surface; values materialize only inside the action unikernel and are never returned by any read tool.\n\n" +
+        "Use `set_config` instead for non-sensitive named values (URLs, thresholds, channel names, recipient addresses) — those benefit from being readable and editable in the dashboard.",
       inputSchema: {
         namespace: z.string(),
         name: z.string(),
@@ -396,6 +414,58 @@ export function buildMcpServer(deps: McpToolDeps): McpServer {
       },
     },
     (args) => wrap(() => setSecret(deps, args)),
+  );
+
+  server.registerTool(
+    "set_config",
+    {
+      description:
+        "Store a NON-SENSITIVE value (URL, threshold, channel name, recipient address, etc.) scoped to a namespace. Read by actions that declare the name in policy.configs. Unlike secrets, config values are READABLE — list_configs returns the values, get_config returns a single value, and the dashboard shows them in plain text. Use this for anything the user benefits from being able to see and edit.\n\n" +
+        "Pick `set_secret` for credentials and signing material; pick `set_config` for everything else the user sets at runtime.",
+      inputSchema: {
+        namespace: z.string(),
+        name: z.string(),
+        value: z.string(),
+      },
+    },
+    (args) => wrap(() => setConfig(deps, args)),
+  );
+
+  server.registerTool(
+    "get_config",
+    {
+      description:
+        "Return a single config's value. 404 if unset. Has no secret-side analogue — secrets are write-only by design.",
+      inputSchema: {
+        namespace: z.string(),
+        name: z.string(),
+      },
+    },
+    (args) => wrap(() => getConfig(deps, args)),
+  );
+
+  server.registerTool(
+    "list_configs",
+    {
+      description:
+        "List all configs in a namespace, including their values and timestamps. Use this when an action needs to discover what's already configured, or to render a settings UI.",
+      inputSchema: {
+        namespace: z.string(),
+      },
+    },
+    (args) => wrap(() => listConfigs(deps, args)),
+  );
+
+  server.registerTool(
+    "delete_config",
+    {
+      description: "Remove a config. Idempotent on missing keys.",
+      inputSchema: {
+        namespace: z.string(),
+        name: z.string(),
+      },
+    },
+    (args) => wrap(() => deleteConfig(deps, args)),
   );
 
   server.registerTool(

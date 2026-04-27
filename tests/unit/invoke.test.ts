@@ -247,4 +247,137 @@ describe("invokeAction", () => {
     );
     expect(run.mock.calls[0]?.[0].secrets).toEqual({});
   });
+
+  it("resolves declared configs and merges them into the env alongside secrets", async () => {
+    const cfg = await store.actions.create({
+      name: "cfgful",
+      code: "x",
+      namespace: "shop",
+      policy: {
+        secrets: ["STRIPE_KEY"],
+        configs: ["MONITOR_URL", "THRESHOLD_CENTS"],
+      },
+    });
+    await store.secrets.set("shop", "STRIPE_KEY", "sk_live_xxx");
+    await store.configs.set("shop", "MONITOR_URL", "https://example.com");
+    await store.configs.set("shop", "THRESHOLD_CENTS", "50000");
+    // Cross-namespace decoy that must not leak.
+    await store.configs.set("other", "MONITOR_URL", "https://wrong");
+    const { runtime, run } = makeRuntime();
+    await invokeAction(
+      { store, runtime, state, port: 0, ceiling: {} },
+      cfg,
+      { trigger: null, input: null },
+    );
+    const runArgs = run.mock.calls[0]?.[0];
+    // Configs and secrets share the env channel at the runtime layer.
+    expect(runArgs.secrets).toEqual({
+      MONITOR_URL: "https://example.com",
+      THRESHOLD_CENTS: "50000",
+      STRIPE_KEY: "sk_live_xxx",
+    });
+    // Both sets of names are passed through policy so unitask propagates them.
+    expect(runArgs.policy.configs).toEqual([
+      "MONITOR_URL",
+      "THRESHOLD_CENTS",
+    ]);
+    expect(runArgs.policy.secrets).toEqual(["STRIPE_KEY"]);
+  });
+
+  it("expands $NAME refs in allowNet against the resolved env at invoke time", async () => {
+    const a = await store.actions.create({
+      name: "dyn",
+      code: "x",
+      namespace: "shop",
+      policy: {
+        configs: ["MONITOR_URL", "STATIC_HOST"],
+        allowNet: ["api.stripe.com", "$MONITOR_URL", "$STATIC_HOST"],
+      },
+    });
+    await store.configs.set(
+      "shop",
+      "MONITOR_URL",
+      "https://example.com/path?x=1",
+    );
+    await store.configs.set("shop", "STATIC_HOST", "bare.dev");
+    const { runtime, run } = makeRuntime();
+    await invokeAction(
+      { store, runtime, state, port: 0, ceiling: {} },
+      a,
+      { trigger: null, input: null },
+    );
+    const runArgs = run.mock.calls[0]?.[0];
+    // Literal hostnames pass through; URL-shaped configs become hostnames;
+    // bare hostnames become themselves.
+    expect(runArgs.policy.allowNet).toEqual([
+      "api.stripe.com",
+      "example.com",
+      "bare.dev",
+    ]);
+  });
+
+  it("drops $NAME refs in allowNet when the value is unset or unparseable", async () => {
+    const a = await store.actions.create({
+      name: "dyn-empty",
+      code: "x",
+      namespace: "shop",
+      policy: {
+        configs: ["MONITOR_URL"],
+        allowNet: ["slack.com", "$MONITOR_URL", "$NEVER_DEFINED"],
+      },
+    });
+    // MONITOR_URL declared but never set → resolve returns nothing for it.
+    const { runtime, run } = makeRuntime();
+    await invokeAction(
+      { store, runtime, state, port: 0, ceiling: {} },
+      a,
+      { trigger: null, input: null },
+    );
+    const runArgs = run.mock.calls[0]?.[0];
+    // The literal stays; the unresolved $-refs are dropped silently. The
+    // action's fetch will be denied by the proxy — that's the right
+    // failure mode (clear error in the action's stderr).
+    expect(runArgs.policy.allowNet).toEqual(["slack.com"]);
+  });
+
+  it("expands $NAME refs in allowTcp host:port targets", async () => {
+    const a = await store.actions.create({
+      name: "dyn-tcp",
+      code: "x",
+      namespace: "shop",
+      policy: {
+        configs: ["DB_HOST"],
+        allowTcp: ["$DB_HOST:5432", "127.0.0.1:6379"],
+      },
+    });
+    await store.configs.set("shop", "DB_HOST", "db.internal");
+    const { runtime, run } = makeRuntime();
+    await invokeAction(
+      { store, runtime, state, port: 0, ceiling: {} },
+      a,
+      { trigger: null, input: null },
+    );
+    expect(run.mock.calls[0]?.[0].policy.allowTcp).toEqual([
+      "db.internal:5432",
+      "127.0.0.1:6379",
+    ]);
+  });
+
+  it("secrets win over configs of the same name (last-write semantics)", async () => {
+    const dup = await store.actions.create({
+      name: "dup",
+      code: "x",
+      namespace: "shop",
+      policy: { secrets: ["DUP"], configs: ["DUP"] },
+    });
+    await store.secrets.set("shop", "DUP", "from-secret");
+    await store.configs.set("shop", "DUP", "from-config");
+    const { runtime, run } = makeRuntime();
+    await invokeAction(
+      { store, runtime, state, port: 0, ceiling: {} },
+      dup,
+      { trigger: null, input: null },
+    );
+    expect(run.mock.calls[0]?.[0].secrets).toEqual({ DUP: "from-secret" });
+  });
 });

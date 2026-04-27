@@ -24,6 +24,7 @@ const LIST_FIELDS = [
   "allowNet",
   "allowTcp",
   "secrets",
+  "configs",
   "files",
   "dirs",
 ] as const;

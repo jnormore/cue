@@ -83,7 +83,58 @@ export function webhookRoutes(deps: InvokeDeps): FastifyPluginAsync {
           auth: authMode,
         },
       };
-      return invokeAction(deps, action, envelope);
+      const result = await invokeAction(deps, action, envelope);
+
+      // The webhook URL is a public HTTP endpoint — what comes back over
+      // the wire should be the action's response, not the runtime's
+      // InvokeResult envelope (which is just platform-side metadata: run
+      // id, exit code, stdout/stderr, etc.). Two well-known shapes for
+      // an action's stdout:
+      //
+      //   1. Lambda/Express style: { status|statusCode, headers?, body }
+      //      → emit `body` with that status + headers.
+      //   2. Plain JSON: anything else (`{ok:true, ...}`, `[1,2,3]`, etc.)
+      //      → emit it as 200 application/json.
+      //
+      // Both let an agent-built dashboard call /w/<trigger> with no
+      // JSON-in-JSON parsing and no special daemon knowledge. The
+      // InvokeResult envelope is only returned when the action printed
+      // nothing parseable — useful as a debug fallback so callers see
+      // *something* explanatory.
+      if (result.exitCode !== 0) {
+        reply.code(500);
+        return {
+          error: "Action failed",
+          exitCode: result.exitCode,
+          // stderr can carry the worker's error trace; cap to avoid
+          // dumping megabytes onto unsuspecting callers.
+          stderr: result.stderr.slice(0, 8 * 1024),
+          runId: result.runId,
+        };
+      }
+      const httpish = detectHttpResponse(result.output);
+      if (httpish) {
+        reply.code(httpish.status);
+        if (httpish.headers) {
+          for (const [k, v] of Object.entries(httpish.headers)) {
+            reply.header(k, v);
+          }
+        }
+        return reply.send(httpish.body);
+      }
+      if (result.output !== null && result.output !== undefined) {
+        return reply.code(200).send(result.output);
+      }
+      // Action exited 0 but didn't print parseable JSON. Surface the
+      // InvokeResult so an operator can see what happened — caller will
+      // get a structured error rather than a confusing empty 200.
+      reply.code(502);
+      return {
+        error: "Action did not return JSON",
+        runId: result.runId,
+        stdout: result.stdout.slice(0, 4 * 1024),
+        stderr: result.stderr.slice(0, 4 * 1024),
+      };
     };
 
     app.route({ method: ["GET", "POST"], url: "/w/:id", handler });
@@ -152,4 +203,61 @@ function safeEq(a: string, b: string): boolean {
   const bb = Buffer.from(b);
   if (ab.length !== bb.length) return false;
   return timingSafeEqual(ab, bb);
+}
+
+interface HttpishResponse {
+  status: number;
+  headers?: Record<string, string | number | boolean>;
+  body: unknown;
+}
+
+/**
+ * Recognize an action's stdout JSON as an HTTP response. The shape:
+ *
+ *   { status: number, body: unknown, headers?: object }
+ *
+ * `statusCode` is also accepted as an alias for `status` (matches the
+ * Lambda gateway convention many agents have seen in training). Headers
+ * must be a plain object if present. The `body` key must be present
+ * (`null` is fine — distinguishes "I'm declaring an HTTP response, body
+ * is null" from "I'm not declaring an HTTP response").
+ *
+ * Conservative on purpose: we only treat output as HTTP-shaped when ALL
+ * three constraints hold (numeric status in [100, 599], `body` key
+ * present, headers either absent or a plain object). Anything else
+ * falls through to the legacy InvokeResult-JSON behavior.
+ */
+export function detectHttpResponse(output: unknown): HttpishResponse | null {
+  if (!output || typeof output !== "object" || Array.isArray(output)) {
+    return null;
+  }
+  const o = output as Record<string, unknown>;
+  const statusRaw = typeof o.status === "number" ? o.status : o.statusCode;
+  if (typeof statusRaw !== "number" || !Number.isInteger(statusRaw)) {
+    return null;
+  }
+  if (statusRaw < 100 || statusRaw > 599) return null;
+  if (!("body" in o)) return null;
+
+  let headers: HttpishResponse["headers"];
+  if (o.headers !== undefined) {
+    if (
+      typeof o.headers !== "object" ||
+      o.headers === null ||
+      Array.isArray(o.headers)
+    ) {
+      // Malformed headers — refuse to treat the whole thing as HTTP-ish
+      // rather than silently dropping them.
+      return null;
+    }
+    const safe: Record<string, string | number | boolean> = {};
+    for (const [k, v] of Object.entries(o.headers as Record<string, unknown>)) {
+      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+        safe[k] = v;
+      }
+    }
+    headers = safe;
+  }
+
+  return { status: statusRaw, body: o.body, headers };
 }

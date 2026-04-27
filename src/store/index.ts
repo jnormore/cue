@@ -14,7 +14,20 @@ export interface Policy {
   timeoutSeconds?: number;
   allowNet?: string[];
   allowTcp?: string[];
+  /**
+   * Sensitive named values (API keys, signing secrets, tokens). Listed
+   * here, the value is materialized into the action's env at run time
+   * but never returned by any read API. Use for anything you wouldn't
+   * want shown in logs or echoed back to the dashboard.
+   */
   secrets?: string[];
+  /**
+   * Non-sensitive named values (URLs, thresholds, channel names,
+   * recipient addresses). Materialized into the action's env at run
+   * time the same way secrets are, but readable via the admin/MCP API
+   * and rendered as plain text in the dashboard.
+   */
+  configs?: string[];
   files?: string[];
   dirs?: string[];
   /**
@@ -337,6 +350,32 @@ export interface SecretStore {
   deleteNamespace(namespace: string): Promise<void>;
 }
 
+export interface ConfigEntry {
+  name: string;
+  value: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Per-namespace config store. Same runtime injection channel as secrets,
+ * but values are READABLE from the admin/MCP surface — for non-sensitive
+ * configuration like URLs, thresholds, channel names, recipient
+ * addresses. Use this whenever the user benefits from being able to
+ * see/edit the value in the dashboard. Use SecretStore for credentials.
+ */
+export interface ConfigStore {
+  set(namespace: string, name: string, value: string): Promise<void>;
+  /** Get a single value (returns null if unset). */
+  get(namespace: string, name: string): Promise<string | null>;
+  /** List all entries with values — different from SecretStore.list. */
+  list(namespace: string): Promise<ConfigEntry[]>;
+  /** Resolve a subset by name; same shape as SecretStore.resolve. */
+  resolve(namespace: string, names: string[]): Promise<Record<string, string>>;
+  delete(namespace: string, name: string): Promise<void>;
+  deleteNamespace(namespace: string): Promise<void>;
+}
+
 export type AgentTokenId = string;
 
 export interface AgentScope {
@@ -407,6 +446,7 @@ export interface StoreAdapter {
   triggers: TriggerStore;
   runs: RunStore;
   secrets: SecretStore;
+  configs: ConfigStore;
   artifacts: ArtifactStore;
   agentTokens: AgentTokenStore;
   /**
@@ -510,6 +550,21 @@ export function validateSecretName(name: string): void {
   }
 }
 
+// Configs share the env-var-identifier shape with secrets; same regex,
+// same length cap. Distinct function so error messages name the right
+// concept and so future divergence (e.g. allowing dotted names) lands
+// in one place.
+export const CONFIG_NAME_MAX = SECRET_NAME_MAX;
+export function validateConfigName(name: string): void {
+  if (!name || name.length > CONFIG_NAME_MAX || !SECRET_NAME_RE.test(name)) {
+    throw new StoreError(
+      "ValidationError",
+      `Invalid config name "${name}" (must match ${SECRET_NAME_RE} and be ≤${CONFIG_NAME_MAX} chars)`,
+      { name },
+    );
+  }
+}
+
 /**
  * Validate an artifact path. The blob-store fs adapter normalizes
  * paths via `path.join`, but we reject anything funky at the API
@@ -597,6 +652,8 @@ export interface NamespaceDeletion {
   actions: ActionId[];
   triggers: TriggerId[];
   secrets: string[];
+  /** Config names that existed in this namespace and got wiped. */
+  configs: string[];
   /** Log keys that existed in this namespace and got wiped. */
   stateKeys: string[];
   /** Artifact paths that existed in this namespace and got wiped. */
@@ -618,6 +675,8 @@ export async function deleteNamespace(
   for (const a of nsActions) await store.actions.delete(a.id);
   const secretNames = await store.secrets.list(namespace);
   await store.secrets.deleteNamespace(namespace);
+  const configEntries = await store.configs.list(namespace);
+  await store.configs.deleteNamespace(namespace);
   const stateKeys = await state.log.list(namespace);
   await state.log.deleteNamespace(namespace);
   await state.tokens.deleteNamespace(namespace);
@@ -630,6 +689,7 @@ export async function deleteNamespace(
     actions: nsActions.map((a) => a.id),
     triggers: toKill.map((t) => t.id),
     secrets: secretNames,
+    configs: configEntries.map((c) => c.name),
     stateKeys,
     artifacts: artifactPaths,
   };
