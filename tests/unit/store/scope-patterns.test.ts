@@ -19,6 +19,17 @@ describe("scopePatternMatches", () => {
     expect(scopePatternMatches("acme-*", "bob-foo")).toBe(false);
   });
 
+  it("'workspace/*' matches any namespace inside that workspace", () => {
+    // Cloud-allocated namespaces have shape "<workspace>/<slug>-<id>";
+    // an agent token scoped to "<workspace>/*" should reach all of them.
+    expect(scopePatternMatches("jason/*", "jason/uptime-monitor-abc")).toBe(true);
+    expect(scopePatternMatches("jason/*", "jason/")).toBe(true);
+    expect(scopePatternMatches("jason/*", "jason")).toBe(false); // no trailing slash
+    expect(scopePatternMatches("jason/*", "alice/uptime-monitor-abc")).toBe(false);
+    // A dash-only legacy namespace shouldn't match a slash wildcard.
+    expect(scopePatternMatches("jason/*", "jason-mnqr84bv")).toBe(false);
+  });
+
   it("literal patterns require exact equality", () => {
     expect(scopePatternMatches("shop", "shop")).toBe(true);
     expect(scopePatternMatches("shop", "shop-2")).toBe(false);
@@ -42,9 +53,15 @@ describe("validateScopePattern", () => {
     expect(() => validateScopePattern("123-*")).not.toThrow();
   });
 
-  it("accepts literal namespace names", () => {
+  it("accepts workspace/* wildcards", () => {
+    expect(() => validateScopePattern("jason/*")).not.toThrow();
+    expect(() => validateScopePattern("acme/*")).not.toThrow();
+  });
+
+  it("accepts literal namespace names (legacy and slash forms)", () => {
     expect(() => validateScopePattern("shop")).not.toThrow();
     expect(() => validateScopePattern("foo-bar")).not.toThrow();
+    expect(() => validateScopePattern("jason/uptime-monitor-abc")).not.toThrow();
   });
 
   it("rejects empty prefix '*' alone is fine but '-*' is rejected", () => {

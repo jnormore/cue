@@ -69,20 +69,28 @@ function encodeKey(key) {
   return key;
 }
 
+// URL-encode the namespace so a workspace-scoped name like
+// "jason/uptime-monitor" sends as "jason%2Fuptime-monitor" — keeps the
+// slash inside the :namespace path param instead of splitting into two
+// path segments. Fastify's find-my-way decodes %2F back to "/" before
+// extracting the param, so the daemon's handler sees the original
+// namespace string.
+const encodedNamespace = encodeURIComponent(namespace);
+
 module.exports = {
   namespace: namespace,
   append(key, entry) {
-    return request("POST", "/state/" + namespace + "/" + encodeKey(key) + "/append", { entry: entry });
+    return request("POST", "/state/" + encodedNamespace + "/" + encodeKey(key) + "/append", { entry: entry });
   },
   read(key, opts) {
     const qs = [];
     if (opts && opts.since != null) qs.push("since=" + encodeURIComponent(String(opts.since)));
     if (opts && opts.limit != null) qs.push("limit=" + encodeURIComponent(String(opts.limit)));
     const query = qs.length ? ("?" + qs.join("&")) : "";
-    return request("GET", "/state/" + namespace + "/" + encodeKey(key) + query, null);
+    return request("GET", "/state/" + encodedNamespace + "/" + encodeKey(key) + query, null);
   },
   delete(key) {
-    return request("DELETE", "/state/" + namespace + "/" + encodeKey(key), null);
+    return request("DELETE", "/state/" + encodedNamespace + "/" + encodeKey(key), null);
   },
 };
 `;

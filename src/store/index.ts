@@ -468,6 +468,14 @@ export const DEFAULT_NAMESPACE = "default";
 const NAME_RE = /^[a-z0-9-]+$/;
 const SECRET_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const ARTIFACT_PATH_RE = /^[a-zA-Z0-9._/-]+$/;
+/**
+ * Namespaces are either a single dash-segment (legacy, e.g. "default" or
+ * "jason-mnqr84bv") or two dash-segments separated by a single slash
+ * (the cloud-allocated shape, e.g. "jason/uptime-monitor-mnqr84bv").
+ * The slash form lets agent tokens scope to "<workspace>/*" wildcards
+ * and reads as a path in URLs (`/u/jason/uptime-monitor/index.html`).
+ */
+const NAMESPACE_RE = /^[a-z0-9-]+(?:\/[a-z0-9-]+)?$/;
 
 export function validateName(name: string): void {
   if (!name || name.length > NAME_MAX || !NAME_RE.test(name)) {
@@ -480,10 +488,10 @@ export function validateName(name: string): void {
 }
 
 export function validateNamespace(ns: string): void {
-  if (!ns || ns.length > NAMESPACE_MAX || !NAME_RE.test(ns)) {
+  if (!ns || ns.length > NAMESPACE_MAX || !NAMESPACE_RE.test(ns)) {
     throw new StoreError(
       "ValidationError",
-      `Invalid namespace "${ns}" (must match ${NAME_RE} and be ≤${NAMESPACE_MAX} chars)`,
+      `Invalid namespace "${ns}" (must match ${NAMESPACE_RE} and be ≤${NAMESPACE_MAX} chars)`,
       { namespace: ns },
     );
   }
@@ -492,9 +500,12 @@ export function validateNamespace(ns: string): void {
 /**
  * Match a scope pattern against a concrete namespace name. Patterns:
  *
- *   "*"        — wildcard, match-all (the local-dev default)
- *   "prefix-*" — prefix match (anything starting with "prefix-")
- *   "literal"  — exact match (the explicit-allowlist case)
+ *   "*"            — wildcard, match-all (the local-dev default)
+ *   "prefix-*"     — dash-prefix match (legacy)
+ *   "workspace/*"  — workspace-scoped wildcard (matches any namespace
+ *                    in that workspace, e.g. "jason/*" matches
+ *                    "jason/uptime-monitor-abc")
+ *   "literal"      — exact match (the explicit-allowlist case)
  *
  * The set of pattern shapes is deliberately closed: no middle-of-string
  * globs, no regex. This keeps the matcher trivial and lets a future
@@ -513,7 +524,7 @@ export function scopePatternMatches(
 }
 
 /**
- * Validate a scope pattern. Accepts the three shapes documented on
+ * Validate a scope pattern. Accepts the four shapes documented on
  * {@link scopePatternMatches}. Throws ValidationError for anything
  * else (middle-of-string globs, empty strings, etc.).
  */
@@ -524,14 +535,24 @@ export function validateScopePattern(pattern: string): void {
     if (!prefix) {
       throw new StoreError(
         "ValidationError",
-        "scope pattern must be '*', a prefix like 'foo-*', or a literal namespace name",
+        "scope pattern must be '*', a prefix like 'foo-*' or 'workspace/*', or a literal namespace name",
         { pattern },
       );
     }
-    if (prefix.length > NAMESPACE_MAX || !NAME_RE.test(prefix)) {
+    // The prefix is what comes BEFORE the trailing star. Two valid
+    // shapes: dash-style ("foo-") or workspace-style ("workspace/").
+    // Match against the same character class as the namespace itself.
+    const trailingChar = prefix[prefix.length - 1];
+    const isDashPrefix = trailingChar === "-" && NAME_RE.test(prefix.slice(0, -1));
+    const isSlashPrefix =
+      trailingChar === "/" && NAME_RE.test(prefix.slice(0, -1));
+    if (
+      prefix.length > NAMESPACE_MAX ||
+      !(isDashPrefix || isSlashPrefix)
+    ) {
       throw new StoreError(
         "ValidationError",
-        `scope prefix "${prefix}" must match ${NAME_RE} and be ≤${NAMESPACE_MAX} chars`,
+        `scope prefix "${prefix}" must end in '-' or '/' and the part before it must match ${NAME_RE} (≤${NAMESPACE_MAX} chars)`,
         { pattern },
       );
     }

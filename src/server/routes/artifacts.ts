@@ -1,4 +1,8 @@
-import type { FastifyPluginAsync } from "fastify";
+import type {
+  FastifyPluginAsync,
+  FastifyReply,
+  FastifyRequest,
+} from "fastify";
 import { timingSafeEqual } from "node:crypto";
 import { type StoreAdapter, StoreError } from "../../store/index.js";
 import { extractBearer } from "../auth.js";
@@ -17,6 +21,15 @@ export interface ArtifactsRouteOpts {
  * via either the `?t=` query param (URL-bearable so a `<script src>`
  * works) or `Authorization: Bearer …`.
  *
+ * Two URL shapes are accepted, matching the two namespace shapes:
+ *   • `/u/<ns>/<path>` — single-segment legacy namespace
+ *     (e.g. `/u/jason-mnqr84bv/index.html`).
+ *   • `/u/<workspace>/<slug>/<path>` — two-segment slash namespace
+ *     (e.g. `/u/jason/uptime-monitor-mnqr84bv/index.html`). Browsers
+ *     don't URL-encode `/` in bookmarked URLs, so we register an
+ *     explicit two-segment variant here. Both shapes share the same
+ *     handler — the only difference is how the namespace is assembled.
+ *
  * Lifecycle:
  *   • paused namespace  → 423 NamespacePaused (matches /w/:id behavior)
  *   • archived namespace → reads still work (read-only freeze, mutations
@@ -27,12 +40,16 @@ export function artifactsRoutes(
   opts: ArtifactsRouteOpts,
 ): FastifyPluginAsync {
   return async (app) => {
-    app.get<{
-      Params: { namespace: string; "*": string };
-      Querystring: { t?: string };
-    }>("/u/:namespace/*", async (req, reply) => {
-      const { namespace } = req.params;
-      const path = req.params["*"];
+    const handler = async (req: FastifyRequest, reply: FastifyReply) => {
+      const params = req.params as {
+        namespace?: string;
+        workspace?: string;
+        slug?: string;
+        "*": string;
+      };
+      const namespace =
+        params.namespace ?? `${params.workspace}/${params.slug}`;
+      const path = params["*"];
       if (!path) {
         // Trailing-slash / bare-namespace requests have no resolution
         // strategy in v1 (no implicit index.html). Fail explicitly.
@@ -73,8 +90,9 @@ export function artifactsRoutes(
       }
 
       if (!rec.public) {
+        const query = (req.query ?? {}) as { t?: unknown };
         const provided =
-          (typeof req.query.t === "string" ? req.query.t : null) ??
+          (typeof query.t === "string" ? query.t : null) ??
           extractBearer(req);
         if (!provided) {
           reply.code(401).send({ error: "view token required" });
@@ -99,7 +117,16 @@ export function artifactsRoutes(
         .header("Content-Length", String(rec.size))
         .header("Cache-Control", "no-cache")
         .send(content);
-    });
+    };
+
+    app.get<{
+      Params: { namespace: string; "*": string };
+      Querystring: { t?: string };
+    }>("/u/:namespace/*", handler);
+    app.get<{
+      Params: { workspace: string; slug: string; "*": string };
+      Querystring: { t?: string };
+    }>("/u/:workspace/:slug/*", handler);
   };
 }
 
