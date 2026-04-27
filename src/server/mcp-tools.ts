@@ -589,14 +589,17 @@ export async function createNamespace(
   // dev default), any name is allowed. With a prefix scope like
   // "acme-*", only names under that prefix succeed.
   requireNamespace(deps.principal, args.name, "create namespace");
+  // Idempotent: if the principal can already see the namespace, return
+  // the existing record rather than throwing NameCollision. The
+  // alternative is what we used to do — throw on existing — and that
+  // turns harmless retries (network blip on the agent side, cron
+  // re-fire after a transient failure) into hard errors. Since the
+  // scope check above already guarantees the caller is allowed to
+  // operate inside this namespace, surfacing NameCollision here adds
+  // no security and removes a real footgun. Two callers racing to
+  // create the same name converge on the same record.
   const existing = await deps.store.namespaces.get(args.name);
-  if (existing) {
-    throw new StoreError(
-      "NameCollision",
-      `Namespace "${args.name}" already exists`,
-      { name: args.name },
-    );
-  }
+  if (existing) return existing;
   const now = new Date().toISOString();
   const record: NamespaceRecord = {
     name: args.name,

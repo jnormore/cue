@@ -7,6 +7,7 @@ import { CronRegistry } from "../../../src/cron/registry.js";
 import type { ActionRuntime } from "../../../src/runtime/index.js";
 import {
   createAction,
+  createNamespace,
   createTrigger,
   deleteActionTool,
   deleteNamespaceTool,
@@ -313,6 +314,32 @@ describe("mcp-tools", () => {
   });
 
   describe("namespaces", () => {
+    it("create_namespace is idempotent for principals with access", async () => {
+      // First call creates the namespace.
+      const first = await createNamespace(deps, {
+        name: "idem",
+        displayName: "Idempotent Test",
+        description: "first call",
+      });
+      expect(first.name).toBe("idem");
+      expect(first.displayName).toBe("Idempotent Test");
+
+      // Second call with the SAME name returns the existing record —
+      // no NameCollision throw. Lets agents retry safely after a
+      // network blip without unwinding their session state.
+      const second = await createNamespace(deps, {
+        name: "idem",
+        displayName: "would be ignored",
+        description: "would be ignored",
+      });
+      expect(second.name).toBe("idem");
+      // Original metadata wins. The second call is a no-op, not an
+      // upsert — `update_namespace` is the tool for renames.
+      expect(second.displayName).toBe("Idempotent Test");
+      expect(second.description).toBe("first call");
+      expect(second.createdAt).toBe(first.createdAt);
+    });
+
     it("delete_namespace cascades actions + triggers and cancels cron handles", async () => {
       const a = await createAction(deps, {
         name: "a",

@@ -418,13 +418,27 @@ describe("namespace lifecycle smoke", () => {
       namespace: "fresh-app",
     });
 
-    // Collision on second create_namespace with the same name.
-    const collision = (await wildcardAgent.callTool({
+    // create_namespace is idempotent for principals that have access:
+    // a second call with the same name returns the existing record
+    // rather than throwing NameCollision. Lets agents retry safely
+    // (network blips, cron re-fires) and lets two callers race to
+    // create the same name without one of them seeing a hard error.
+    const second = (await wildcardAgent.callTool({
       name: "create_namespace",
       arguments: { name: "fresh-app" },
-    })) as { isError: boolean; content: { type: string; text: string }[] };
-    expect(collision.isError).toBe(true);
-    expect(collision.content[0]!.text).toMatch(/already exists/i);
+    })) as { isError?: boolean; content: { type: string; text: string }[] };
+    expect(second.isError).toBeFalsy();
+    const repeat = JSON.parse(second.content[0]!.text) as {
+      name: string;
+      status: string;
+      displayName?: string;
+    };
+    expect(repeat.name).toBe("fresh-app");
+    expect(repeat.status).toBe("active");
+    // The original metadata is preserved — the second call is a no-op,
+    // not an upsert. Updating the display name is a job for
+    // update_namespace.
+    expect(repeat.displayName).toBe("Fresh App");
 
     await wildcardAgent.close();
     // Cleanup — cascade-delete the namespace we created.
