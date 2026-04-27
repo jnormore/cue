@@ -239,7 +239,14 @@ export interface TriggerRef {
   type: "cron" | "webhook";
   actionId: string;
   webhookUrl?: string;
+  /**
+   * The trigger's bearer credential. Only meaningful when `authMode` is
+   * "bearer" — in "public" and "artifact-session" modes this token is
+   * not consulted by the daemon and SHOULD NOT be embedded in artifacts.
+   */
   webhookToken?: string;
+  /** "bearer" | "public" | "artifact-session"; webhook only. */
+  authMode?: "bearer" | "public" | "artifact-session";
 }
 
 export async function createTrigger(
@@ -249,6 +256,8 @@ export async function createTrigger(
     actionId: string;
     namespace?: string;
     config?: Partial<CronConfig>;
+    /** Webhook only. Defaults to "bearer". See WebhookAuthMode. */
+    auth?: "bearer" | "public" | "artifact-session";
   },
 ): Promise<TriggerRef> {
   const action = await deps.store.actions.get(args.actionId);
@@ -260,13 +269,20 @@ export async function createTrigger(
   const namespace = args.namespace ?? action.namespace;
   requireNamespace(deps.principal, namespace, "create trigger in");
   await assertNamespaceMutable(deps.store, namespace);
+  if (args.auth !== undefined && args.type !== "webhook") {
+    throw new StoreError(
+      "ValidationError",
+      `auth is only valid for type="webhook"`,
+      { type: args.type, auth: args.auth },
+    );
+  }
   const config =
     args.type === "cron"
       ? {
           schedule: args.config?.schedule ?? "",
           ...(args.config?.timezone ? { timezone: args.config.timezone } : {}),
         }
-      : ({} as Record<string, never>);
+      : { authMode: args.auth ?? "bearer" };
   const trigger = await deps.store.triggers.create({
     type: args.type,
     actionId: args.actionId,
@@ -284,6 +300,7 @@ export async function createTrigger(
   if (trigger.type === "webhook" && trigger.config.type === "webhook") {
     ref.webhookUrl = deps.webhookUrlFor(trigger.id);
     ref.webhookToken = trigger.config.token;
+    ref.authMode = trigger.config.authMode;
   }
   return ref;
 }

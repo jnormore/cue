@@ -15,6 +15,12 @@ export interface WebhookRequestEnvelope {
   query: Record<string, unknown>;
   headers: Record<string, string | string[] | undefined>;
   body: unknown;
+  /**
+   * How the request authenticated against the trigger's auth gate. Lets
+   * action code make trust-level decisions without re-deriving from
+   * headers/query. See WebhookAuthMode in store/index.ts for semantics.
+   */
+  auth: "bearer" | "public" | "artifact-session";
 }
 
 export interface InvokeEnvelope {

@@ -239,6 +239,120 @@ describe("server", () => {
       expect(envelope.request.query).toEqual({ ref: "abc" });
       expect(envelope.request.body).toEqual({ message: "hello" });
       expect(envelope.request.headers["x-custom"]).toBe("yes");
+      // Default trigger uses bearer auth, surfaced in the envelope so the
+      // action can make trust decisions without re-deriving from headers.
+      expect(envelope.request.auth).toBe("bearer");
+    });
+  });
+
+  // The remaining auth modes are non-default — pick during create_trigger.
+  describe("POST /w/:id (auth modes)", () => {
+    let action: ActionRecord;
+
+    beforeEach(async () => {
+      action = await store.actions.create({ name: "hook-modes", code: "x" });
+    });
+
+    describe("auth: 'public'", () => {
+      it("invokes the action without any token", async () => {
+        const trigger = await store.triggers.create({
+          type: "webhook",
+          actionId: action.id,
+          namespace: "default",
+          config: { authMode: "public" },
+        });
+        const res = await app.inject({
+          method: "POST",
+          url: `/w/${trigger.id}`,
+          payload: { stripe: "event" },
+        });
+        expect(res.statusCode).toBe(200);
+        const envelope = JSON.parse(runMock.mock.calls[0]?.[0].stdin);
+        expect(envelope.request.auth).toBe("public");
+        expect(envelope.request.body).toEqual({ stripe: "event" });
+      });
+
+      it("ignores any token the caller happens to send", async () => {
+        const trigger = await store.triggers.create({
+          type: "webhook",
+          actionId: action.id,
+          namespace: "default",
+          config: { authMode: "public" },
+        });
+        const res = await app.inject({
+          method: "POST",
+          url: `/w/${trigger.id}`,
+          headers: { authorization: "Bearer obviously-not-the-token" },
+        });
+        expect(res.statusCode).toBe(200);
+      });
+    });
+
+    describe("auth: 'artifact-session'", () => {
+      let trigger: TriggerRecord;
+      let artifactToken: string;
+
+      beforeEach(async () => {
+        trigger = await store.triggers.create({
+          type: "webhook",
+          actionId: action.id,
+          namespace: "default",
+          config: { authMode: "artifact-session" },
+        });
+        const art = await store.artifacts.create({
+          namespace: "default",
+          path: "dash.html",
+          content: "<html/>",
+          public: false,
+        });
+        artifactToken = art.viewToken;
+      });
+
+      it("401 without a token", async () => {
+        const res = await app.inject({
+          method: "GET",
+          url: `/w/${trigger.id}`,
+        });
+        expect(res.statusCode).toBe(401);
+      });
+
+      it("401 when the trigger's bearer token is presented (must be a viewToken)", async () => {
+        if (trigger.config.type !== "webhook") throw new Error("bad config");
+        const res = await app.inject({
+          method: "GET",
+          url: `/w/${trigger.id}?t=${trigger.config.token}`,
+        });
+        expect(res.statusCode).toBe(401);
+      });
+
+      it("401 when the viewToken belongs to an artifact in another namespace", async () => {
+        const otherArt = await store.artifacts.create({
+          namespace: "different",
+          path: "other.html",
+          content: "<html/>",
+          public: false,
+        });
+        const res = await app.inject({
+          method: "GET",
+          url: `/w/${trigger.id}?t=${otherArt.viewToken}`,
+        });
+        expect(res.statusCode).toBe(401);
+      });
+
+      it("200 with a matching viewToken — envelope marks auth=artifact-session", async () => {
+        const res = await app.inject({
+          method: "GET",
+          url: `/w/${trigger.id}?t=${artifactToken}&limit=5`,
+        });
+        expect(res.statusCode).toBe(200);
+        const envelope = JSON.parse(runMock.mock.calls[0]?.[0].stdin);
+        expect(envelope.request.auth).toBe("artifact-session");
+        expect(envelope.request.method).toBe("GET");
+        expect(envelope.request.query).toEqual({
+          t: artifactToken,
+          limit: "5",
+        });
+      });
     });
   });
 

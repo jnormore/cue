@@ -58,9 +58,29 @@ export interface CronConfig {
   timezone?: string;
 }
 
+/**
+ * How the daemon gates access to a webhook trigger's URL.
+ *
+ *   • "bearer" (default, backwards-compatible): caller must present the
+ *     trigger's `token` via `Authorization: Bearer <token>` or `?t=<token>`.
+ *     The right pick for server-to-server callers (cron, internal services).
+ *
+ *   • "public": no auth on the wire. The action MUST authenticate the
+ *     caller itself (e.g. Stripe-Signature HMAC against a stored secret).
+ *     The right pick for inbound webhooks from third parties that can't
+ *     send arbitrary headers.
+ *
+ *   • "artifact-session": ?t=<token> must equal the viewToken of a
+ *     non-public artifact in the same namespace. Lets a private dashboard
+ *     served at /u/<ns>/index.html?t=<viewToken> call read-only triggers
+ *     without baking a long-lived secret into HTML — the same token gates
+ *     both the page and its data fetches.
+ */
+export type WebhookAuthMode = "bearer" | "public" | "artifact-session";
+
 export type TriggerConfigData =
   | { type: "cron"; schedule: string; timezone?: string }
-  | { type: "webhook"; token: string };
+  | { type: "webhook"; token: string; authMode: WebhookAuthMode };
 
 export interface TriggerRecord {
   id: TriggerId;
@@ -71,11 +91,16 @@ export interface TriggerRecord {
   config: TriggerConfigData;
 }
 
+export interface WebhookTriggerCreateConfig {
+  /** Defaults to "bearer" if omitted (backwards-compat with pre-authMode callers). */
+  authMode?: WebhookAuthMode;
+}
+
 export interface TriggerCreateInput {
   type: TriggerType;
   actionId: ActionId;
   namespace: string;
-  config: CronConfig | Record<string, never>;
+  config: CronConfig | WebhookTriggerCreateConfig;
 }
 
 export interface RunSummary {
@@ -287,6 +312,16 @@ export interface ArtifactStore {
   deleteNamespace(namespace: string): Promise<string[]>;
   /** Read raw content as utf8 string. null if not found. */
   read(namespace: string, path: string): Promise<string | null>;
+  /**
+   * Look up a non-public artifact in the namespace whose viewToken matches.
+   * Returns null if no match. Comparisons are constant-time per row to avoid
+   * leaking which token, if any, was a near-match. Used by the webhook
+   * route's "artifact-session" auth mode.
+   */
+  findByViewToken(
+    namespace: string,
+    token: string,
+  ): Promise<ArtifactRecord | null>;
 }
 
 /**

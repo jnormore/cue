@@ -7,10 +7,18 @@ import {
   type TriggerRecord,
   type TriggerStore,
   type TriggerSubscription,
+  type WebhookAuthMode,
+  type WebhookTriggerCreateConfig,
   newTriggerId,
   newWebhookToken,
   validateNamespace,
 } from "../../index.js";
+
+const VALID_AUTH_MODES: ReadonlySet<WebhookAuthMode> = new Set([
+  "bearer",
+  "public",
+  "artifact-session",
+]);
 
 interface TriggerRow {
   id: string;
@@ -23,13 +31,19 @@ interface TriggerRow {
 }
 
 function toRecord(r: TriggerRow): TriggerRecord {
+  const parsed = JSON.parse(r.config) as TriggerConfigData;
+  // Legacy rows (pre-authMode) lack the field; normalize on read so
+  // downstream code can treat config.authMode as required.
+  if (parsed.type === "webhook" && !parsed.authMode) {
+    parsed.authMode = "bearer";
+  }
   return {
     id: r.id,
     type: r.type,
     actionId: r.action_id,
     namespace: r.namespace,
     createdAt: r.created_at,
-    config: JSON.parse(r.config) as TriggerConfigData,
+    config: parsed,
   };
 }
 
@@ -49,7 +63,16 @@ function buildConfig(input: TriggerCreateInput): TriggerConfigData {
     };
   }
   if (input.type === "webhook") {
-    return { type: "webhook", token: newWebhookToken() };
+    const c = (input.config ?? {}) as WebhookTriggerCreateConfig;
+    const authMode: WebhookAuthMode = c.authMode ?? "bearer";
+    if (!VALID_AUTH_MODES.has(authMode)) {
+      throw new StoreError(
+        "ValidationError",
+        `Unknown webhook authMode "${authMode}"`,
+        { authMode },
+      );
+    }
+    return { type: "webhook", token: newWebhookToken(), authMode };
   }
   throw new StoreError(
     "ValidationError",

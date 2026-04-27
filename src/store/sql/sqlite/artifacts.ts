@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { BlobStore } from "../../../blob/index.js";
 import { detectMimeType } from "../../../util/mime.js";
@@ -241,6 +241,30 @@ export function sqliteArtifacts(
       validateNamespace(namespace);
       validateArtifactPath(path);
       return blob.get(blobKey(namespace, path));
+    },
+
+    async findByViewToken(namespace, token) {
+      validateNamespace(namespace);
+      // Empty input never matches: public artifacts store an empty token,
+      // and we don't want `findByViewToken(ns, "")` to silently return one.
+      if (!token) return null;
+      const rows = db
+        .prepare(
+          "SELECT * FROM artifacts WHERE namespace = ? AND public = 0",
+        )
+        .all(namespace) as unknown as ArtifactRow[];
+      // Walk every row and compare in constant time. We don't `WHERE
+      // view_token = ?` because that's a non-constant-time string compare
+      // inside SQLite — at the cost of an irrelevant timing leak for what
+      // is already a short list (the agent ships ~1-5 artifacts per app).
+      const candidate = Buffer.from(token);
+      let match: ArtifactRow | null = null;
+      for (const r of rows) {
+        const stored = Buffer.from(r.view_token);
+        if (stored.length !== candidate.length) continue;
+        if (timingSafeEqual(stored, candidate)) match = r;
+      }
+      return match ? toRecord(match) : null;
     },
   };
 }

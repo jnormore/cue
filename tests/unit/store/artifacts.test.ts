@@ -253,4 +253,49 @@ describe("sqlite artifacts store", () => {
       expect((await artifacts.list("other")).length).toBe(1);
     });
   });
+
+  describe("findByViewToken", () => {
+    it("returns the matching non-public artifact", async () => {
+      const a = await artifacts.create({
+        namespace: "demo",
+        path: "index.html",
+        content: "<h1>private</h1>",
+        public: false,
+      });
+      expect(a.viewToken).not.toBe("");
+      const found = await artifacts.findByViewToken("demo", a.viewToken);
+      expect(found?.path).toBe("index.html");
+    });
+
+    it("does not match across namespaces", async () => {
+      const a = await artifacts.create({
+        namespace: "ns-a",
+        path: "x.html",
+        content: "x",
+        public: false,
+      });
+      // Same viewToken, but the lookup is in a different namespace.
+      expect(await artifacts.findByViewToken("ns-b", a.viewToken)).toBeNull();
+    });
+
+    it("does not match public artifacts (empty token)", async () => {
+      await artifacts.create({
+        namespace: "demo",
+        path: "p.html",
+        content: "p",
+        public: true,
+      });
+      expect(await artifacts.findByViewToken("demo", "")).toBeNull();
+    });
+
+    it("returns null for an unknown token", async () => {
+      await artifacts.create({
+        namespace: "demo",
+        path: "x.html",
+        content: "x",
+        public: false,
+      });
+      expect(await artifacts.findByViewToken("demo", "art_nope")).toBeNull();
+    });
+  });
 });

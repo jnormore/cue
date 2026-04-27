@@ -245,13 +245,17 @@ export function buildMcpServer(deps: McpToolDeps): McpServer {
       description:
         "Create a cron or webhook trigger for an action.\n\n" +
         "  • cron     — fires the action on a schedule. config: { schedule: '* * * * *', timezone? }. Cron expressions are 5- or 6-field standard form.\n" +
-        "  • webhook  — returns { webhookUrl, webhookToken }. The webhookUrl is a single endpoint of shape `http://<daemon>/w/<triggerId>` — there are NO path sub-routes (do not append /increment, /reset, etc.; the URL is opaque). Dispatch happens inside the action by reading `env.request.method` and `env.request.query`.\n\n" +
-        "**Webhook auth** accepts the token via `Authorization: Bearer <webhookToken>` OR `?t=<webhookToken>` query param. Programmatic callers should use the header. Browser-clickable URLs should put the token in the query string so a plain GET works without setting headers.\n\n" +
-        "**Method semantics:**\n" +
+        "  • webhook  — returns { webhookUrl, webhookToken, authMode }. The webhookUrl is a single endpoint of shape `http://<daemon>/w/<triggerId>` — there are NO path sub-routes (do not append /increment, /reset, etc.; the URL is opaque). Dispatch happens inside the action by reading `env.request.method` and `env.request.query`.\n\n" +
+        "**Webhook auth modes** (the `auth` arg, default `bearer`):\n" +
+        "  • `bearer` — caller presents `webhookToken` via `Authorization: Bearer …` or `?t=<webhookToken>`. Pick this for server-to-server callers (other actions, scripts, internal services) where the token can be stored as a secret, not in HTML.\n" +
+        "  • `public` — no token check on the wire. The action MUST authenticate the caller itself (e.g. verify Stripe-Signature against a STRIPE_WEBHOOK_SECRET secret). Pick this for inbound webhooks from third parties (Stripe, GitHub, Slack) that can't include a custom Authorization header.\n" +
+        "  • `artifact-session` — `?t=<token>` must equal the viewToken of a non-public artifact in this trigger's namespace. Pick this for triggers a private dashboard reads from: serve the dashboard as `create_artifact({ public: false })`, get back its viewToken, and have the page JS read `new URLSearchParams(location.search).get('t')` and pass it as `?t=` on its fetches. The user bookmarks `…/index.html?t=<viewToken>`; sharing that URL = sharing dashboard access. NEVER hard-code webhookToken into artifacts — that's what this mode is for.\n\n" +
+        "**Method semantics** (orthogonal to auth):\n" +
         "  • POST → request body lands at `env.input`; full HTTP context at `env.request`.\n" +
         "  • GET  → `env.input` is null; query params at `env.request.query` for REST-shaped reads.\n\n" +
-        "Webhook URLs are served on the SAME origin as artifacts — UIs uploaded via create_artifact can fetch the webhook URL with no CORS or mixed-content. Bake the URL+token into your HTML at deploy time. See create_artifact for the composition pattern.\n\n" +
+        "Webhook URLs are served on the SAME origin as artifacts — UIs uploaded via create_artifact can fetch the webhook URL with no CORS or mixed-content.\n\n" +
         "**Webhook URLs are not page URLs.** Don't have an action serve HTML on GET — that's an SSR anti-pattern that boots a unikernel per page load. Use create_artifact for the page; have the page's JS fetch the webhook for dynamic data.\n\n" +
+        "**Common Stripe-style pattern:** ONE namespace, ONE action that handles both ingest and read by switching on `env.request.method`, but TWO triggers pointing at it: a `public` POST trigger (Stripe sends events here, action verifies signature) and an `artifact-session` GET trigger (dashboard fetches stored data here).\n\n" +
         "When `namespace` is omitted, the trigger inherits the action's namespace.",
       inputSchema: {
         type: z.enum(["cron", "webhook"]),
@@ -263,6 +267,12 @@ export function buildMcpServer(deps: McpToolDeps): McpServer {
             timezone: z.string().optional(),
           })
           .optional(),
+        auth: z
+          .enum(["bearer", "public", "artifact-session"])
+          .optional()
+          .describe(
+            "Webhook only. Default 'bearer'. Use 'public' for inbound third-party webhooks (action verifies signatures); use 'artifact-session' for dashboards reading their own data via the artifact's viewToken.",
+          ),
       },
     },
     (args) => wrap(() => createTrigger(deps, args)),
@@ -393,31 +403,24 @@ export function buildMcpServer(deps: McpToolDeps): McpServer {
     {
       description:
         "**This is the right tool for serving HTML, JS, CSS, or images** — anything where the bytes don't depend on the caller. Bytes go to the daemon and are served at `GET /u/<namespace>/<path>` directly from the blob store (no unikernel boot, no per-request cost). Do NOT have an action return HTML on every page load; use an artifact for the static shell and have its JS fetch webhooks for dynamic data.\n\n" +
-        "Public artifacts (default) need no auth on the URL; non-public artifacts return a `viewToken` at create time — share the URL as `<url>?t=<viewToken>`.\n\n" +
-        "**Why artifacts exist:** giving the agent's app a UI. The same cue daemon serves both `/u/<ns>/*` (artifacts) and `/w/:id` (webhooks), so HTML/JS uploaded as artifacts can `fetch()` webhook URLs on the **same origin** — no CORS, no mixed-content blocking, no third-party iframe sandbox to fight. This is the unlock for browser-rendered agent apps.\n\n" +
-        "**Compose with actions and triggers** to build a working app:\n" +
-        "  1. create_action — backend logic, e.g. `record-visit` that appends to state\n" +
-        "  2. create_trigger({ type: 'webhook', actionId }) — returns webhookUrl + webhookToken\n" +
-        "  3. create_artifact({ path: 'index.html', content: <bake the webhook URL+token into the HTML> })\n" +
-        "  4. open `http://<daemon>/u/<ns>/index.html` in a browser → the JS calls the webhook on same origin\n\n" +
-        "**HTML skeleton** (agent bakes the webhook URL/token in at deploy time — they're already known from create_trigger):\n" +
-        "  <!doctype html>\n" +
-        "  <html><body>\n" +
-        "    <button id=hit>Visit</button>\n" +
-        "    <pre id=out></pre>\n" +
-        "    <script>\n" +
-        "      const URL = 'http://127.0.0.1:4747/w/<triggerId>';\n" +
-        "      const TOKEN = 'tok_<webhookToken>';\n" +
-        "      document.getElementById('hit').onclick = async () => {\n" +
-        "        const r = await fetch(URL, {\n" +
-        "          method: 'POST',\n" +
-        "          headers: { 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' },\n" +
-        "          body: JSON.stringify({})\n" +
-        "        });\n" +
-        "        document.getElementById('out').textContent = await r.text();\n" +
-        "      };\n" +
-        "    </script>\n" +
-        "  </body></html>\n\n" +
+        "Public artifacts (default `public: true`) need no auth on the URL. Non-public artifacts (`public: false`) return a `viewToken` at create time — share the URL as `<url>?t=<viewToken>`.\n\n" +
+        "**SECURITY: never embed a webhookToken in artifact HTML/JS.** Anyone who can fetch the artifact will read it from page source. For dashboards that need a stable bookmarkable URL AND read live data, use the **artifact-session** pattern (see below) instead.\n\n" +
+        "**Why artifacts exist:** giving the agent's app a UI. The same cue daemon serves both `/u/<ns>/*` (artifacts) and `/w/:id` (webhooks), so HTML/JS uploaded as artifacts can `fetch()` webhook URLs on the **same origin** — no CORS, no mixed-content blocking, no third-party iframe sandbox to fight.\n\n" +
+        "**Pattern A — public artifact + bearer webhook** (use when the dashboard is genuinely public, e.g. status page that shows already-public data):\n" +
+        "  1. create_action — backend logic\n" +
+        "  2. create_trigger({ type: 'webhook', actionId, auth: 'bearer' }) — token MUST stay server-side\n" +
+        "  3. create_artifact({ path: 'index.html', public: true, content: ... }) — never bakes the token in\n" +
+        "  This pattern only works if the dashboard doesn't need to call the webhook from the browser.\n\n" +
+        "**Pattern B — private dashboard reading its own data** (the common case for `bookmark this page` UIs):\n" +
+        "  1. create_action — handles GET (read) and POST (write) by switching on env.request.method\n" +
+        "  2. create_trigger({ type: 'webhook', actionId, auth: 'artifact-session' }) — returns webhookUrl; webhookToken is unused in this mode\n" +
+        "  3. create_artifact({ path: 'index.html', public: false, content: ... }) — returns a viewToken\n" +
+        "  4. The user bookmarks `http://<daemon>/u/<ns>/index.html?t=<viewToken>`. The page JS does:\n" +
+        "       const t = new URLSearchParams(location.search).get('t');\n" +
+        "       const r = await fetch('<webhookUrl>?t=' + encodeURIComponent(t) + '&limit=100');\n" +
+        "  The `?t=` token gates BOTH the page load and the data fetch; sharing the URL = sharing the dashboard. No long-lived secret in HTML.\n\n" +
+        "**Pattern C — third-party ingest + private dashboard** (Stripe-style):\n" +
+        "  Reuse Pattern B for the dashboard. Add a SECOND trigger pointing at the same action with `auth: 'public'` for the third-party POST. The action verifies signatures (e.g. Stripe-Signature HMAC) using a stored secret. Two triggers, one action, one artifact.\n\n" +
         "Each create_artifact call uploads ONE file. For multi-file apps (HTML + separate JS/CSS), call create_artifact once per file with paths like `index.html`, `js/app.js`, `styles/main.css`. The HTML can reference siblings via relative paths (`<script src='js/app.js'>`).\n\n" +
         "**MIME** is auto-detected from the path's extension when omitted; explicit `mimeType` wins. Size cap: 10MB per artifact. Path constraints: `[a-zA-Z0-9._/-]+`, no leading/trailing `/`, no `..` or `//`.",
       inputSchema: {
