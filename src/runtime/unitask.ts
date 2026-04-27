@@ -130,9 +130,13 @@ export function unitaskRuntime(opts: UnitaskRuntimeOpts = {}): ActionRuntime {
         };
         try {
           parsed = JSON.parse(r.stdout);
-        } catch {
+        } catch (parseErr) {
+          // Surface both ends of the captured stdout — mid-string
+          // truncation (e.g., a stream race in the subprocess
+          // wrapper) is otherwise indistinguishable from a malformed
+          // start, and the head-only preview hides where the break is.
           throw new Error(
-            `unitask returned non-JSON output (host exit ${r.exitCode}). stdout: ${truncate(r.stdout, 200)} stderr: ${truncate(r.stderr, 200)}`,
+            `unitask returned non-JSON output (host exit ${r.exitCode}, ${r.stdout.length} bytes). parse error: ${(parseErr as Error).message}. stdout head: ${truncate(r.stdout, 200)} stdout tail: …${r.stdout.slice(-200)}`,
           );
         }
         return {
@@ -233,9 +237,42 @@ const defaultExec: SubprocessExec = (cmd, args, opts) =>
       stdio: ["pipe", "pipe", "pipe"],
       ...(opts.env !== undefined ? { env: opts.env } : {}),
     });
-    let stdout = "";
-    let stderr = "";
+    // Accumulate as Buffers and concat once at the end. The previous
+    // approach of `stdout += chunk.toString('utf8')` had a subtle race:
+    // we resolved on the child's `close` event, but in practice stdout
+    // `data` events for output > one OS pipe page (8KB on macOS) could
+    // still be in flight when `close` fired. Strings of suspiciously
+    // exactly 8192 bytes were the symptom — a single pipe-page chunk
+    // landed before the rest of the action's JSON output. Track
+    // stream-end and process-exit independently and only resolve when
+    // all three have completed.
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutDone = false;
+    let stderrDone = false;
+    let exited = false;
+    let exitCode: number | null = null;
+    let exitSignal: NodeJS.Signals | null = null;
     let timedOut = false;
+    let settled = false;
+
+    const finalize = () => {
+      if (settled) return;
+      if (!(stdoutDone && stderrDone && exited)) return;
+      settled = true;
+      clearTimeout(timer);
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+      if (timedOut) {
+        resolve({ stdout, stderr, exitCode: 124 });
+      } else {
+        resolve({
+          stdout,
+          stderr,
+          exitCode: exitCode ?? (exitSignal ? 128 : 0),
+        });
+      }
+    };
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -243,28 +280,30 @@ const defaultExec: SubprocessExec = (cmd, args, opts) =>
     }, opts.timeoutMs);
 
     child.stdout.on("data", (c: Buffer) => {
-      stdout += c.toString("utf8");
+      stdoutChunks.push(c);
     });
     child.stderr.on("data", (c: Buffer) => {
-      stderr += c.toString("utf8");
+      stderrChunks.push(c);
     });
-
+    child.stdout.on("end", () => {
+      stdoutDone = true;
+      finalize();
+    });
+    child.stderr.on("end", () => {
+      stderrDone = true;
+      finalize();
+    });
+    child.on("exit", (code, signal) => {
+      exitCode = code;
+      exitSignal = signal;
+      exited = true;
+      finalize();
+    });
     child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       reject(err);
-    });
-
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      if (timedOut) {
-        resolve({ stdout, stderr, exitCode: 124 });
-      } else {
-        resolve({
-          stdout,
-          stderr,
-          exitCode: code ?? (signal ? 128 : 0),
-        });
-      }
     });
 
     child.stdin.write(opts.stdin);
