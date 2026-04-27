@@ -54,6 +54,8 @@ export function adminRoutes(opts: AdminRoutesOpts): FastifyPluginAsync {
     registerAgentTokenRoutes(app, opts);
     registerArtifactRoutes(app, opts);
     registerNamespaceRoutes(app, opts);
+    registerRunRoutes(app, opts);
+    registerStateAdminRoutes(app, opts);
   };
 }
 
@@ -486,4 +488,85 @@ function registerNamespaceRoutes(
       };
     },
   );
+}
+
+// ---------- runs ----------
+
+function registerRunRoutes(
+  app: Parameters<FastifyPluginAsync>[0],
+  opts: AdminRoutesOpts,
+): void {
+  // Single-run detail: meta + stdout + stderr + input. The list path
+  // (recent runs for an action) lives at /admin/actions/:id/runs and
+  // returns just summaries; this is the read-everything-about-one path
+  // operator UIs use to inspect a specific failure.
+  app.get<{ Params: { id: string } }>(
+    "/admin/runs/:id",
+    async (req, reply) => {
+      const meta = await opts.store.runs.get(req.params.id);
+      if (!meta) {
+        reply
+          .code(404)
+          .send({ error: `Run ${req.params.id} not found`, kind: "NotFound" });
+        return;
+      }
+      const [stdout, stderr, input] = await Promise.all([
+        opts.store.runs.readStdout(req.params.id),
+        opts.store.runs.readStderr(req.params.id),
+        opts.store.runs.readInput(req.params.id),
+      ]);
+      return { ...meta, stdout, stderr, input };
+    },
+  );
+}
+
+// ---------- state (admin read-only) ----------
+
+function registerStateAdminRoutes(
+  app: Parameters<FastifyPluginAsync>[0],
+  opts: AdminRoutesOpts,
+): void {
+  // Master-token-only endpoints for browsing a namespace's state log.
+  // The agent-facing /state/:namespace/:key routes are scoped to the
+  // namespace's state token and only expose append/read/delete; this
+  // pair adds "list all keys" so an operator UI can enumerate what an
+  // app has stored without knowing the keys up front.
+  app.get<{ Params: { namespace: string } }>(
+    "/admin/state/:namespace",
+    async (req) => {
+      const keys = await opts.state.log.list(req.params.namespace);
+      return { namespace: req.params.namespace, keys: keys.slice().sort() };
+    },
+  );
+
+  app.get<{
+    Params: { namespace: string; key: string };
+    Querystring: { since?: string; limit?: string };
+  }>("/admin/state/:namespace/:key", async (req, reply) => {
+    const { namespace, key } = req.params;
+    const sinceRaw = req.query.since;
+    const limitRaw = req.query.limit;
+    const since =
+      sinceRaw !== undefined ? Number.parseInt(sinceRaw, 10) : undefined;
+    const limit =
+      limitRaw !== undefined ? Number.parseInt(limitRaw, 10) : 200;
+    if (sinceRaw !== undefined && !Number.isFinite(since)) {
+      reply.code(400).send({ error: `Invalid since: ${sinceRaw}` });
+      return;
+    }
+    if (!Number.isFinite(limit) || (limit as number) < 0) {
+      reply.code(400).send({ error: `Invalid limit: ${limitRaw}` });
+      return;
+    }
+    try {
+      return await opts.state.log.read(namespace, key, {
+        ...(since !== undefined ? { since: since as number } : {}),
+        limit: limit as number,
+      });
+    } catch (err) {
+      reply.code(400).send({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
 }

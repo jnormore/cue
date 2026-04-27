@@ -301,8 +301,17 @@ export async function createTrigger(
   };
   if (trigger.type === "webhook" && trigger.config.type === "webhook") {
     ref.webhookUrl = deps.webhookUrlFor(trigger.id);
-    ref.webhookToken = trigger.config.token;
     ref.authMode = trigger.config.authMode;
+    // Only return webhookToken in `bearer` mode — for `public` and
+    // `artifact-session` the token is never consulted at the wire and
+    // the agent has no business embedding it. Returning the value
+    // anyway tempts the model into hard-coding it into HTML, which
+    // (a) leaks a credential the daemon won't even check and
+    // (b) would still be discoverable in artifact source. Fail closed
+    // by simply not returning the field.
+    if (trigger.config.authMode === "bearer") {
+      ref.webhookToken = trigger.config.token;
+    }
   }
   return ref;
 }
